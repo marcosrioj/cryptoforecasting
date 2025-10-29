@@ -10,7 +10,7 @@ from ta.momentum import RSIIndicator, StochRSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
-from sklearn.model_selection import TimeSeriesSplit  # <- fixed import
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.linear_model import ElasticNet
 import lightgbm as lgb
@@ -26,7 +26,7 @@ TIMEFRAMES = {"1w": "W", "1d": "D", "4h": "240", "1h": "60", "5m": "5"}
 ORDERED_TF = ["1w","1d","4h","1h","5m"]
 LIMITS     = {"1w": 520, "1d": 1500, "4h": 1500, "1h": 1500, "5m": 1500}
 
-# Per-timeframe minimum history (weeks often have fewer total candles)
+# Per-timeframe minimum history
 MIN_ROWS_TF = {"1w": 30, "1d": 200, "4h": 200, "1h": 200, "5m": 200}
 
 BUY_BPS, SELL_BPS = 10, -10
@@ -35,7 +35,7 @@ SEED = 42
 W_PRICE, W_RET_LGB, W_RET_EN = 0.5, 0.3, 0.2
 # ==========================================================
 
-# ---- color setup (preserve previous color logic, but allow disabling) ----
+# ---- color setup ----
 COLOR_ENABLED = True
 def _set_color(enabled: bool):
     global COLOR_ENABLED, GREEN, RED, YELL, CYAN, WHITE, RESET
@@ -52,7 +52,7 @@ def _set_color(enabled: bool):
 
 _set_color(True)
 
-# ---- icon setup (toggleable) ----
+# ---- icon setup ----
 ICONS_ENABLED = True
 ICON_OVERALL = "🧭"
 ICON_1W = "🕒"
@@ -326,13 +326,13 @@ def print_overall(signals_ordered: List[str], results: Dict[str,dict], vote: int
     print(divider())
 
 def print_timeframe_block(tf: str, r: dict):
-    # Signal moved into the title line
     head = f"{_icon(tf)}[{tf}]  - Signal: {_color_signal_word(r['sig'])}"
     print(head)
     dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
+    # >>> Unformatted raw values for last and pred <<<
     row1 = (
-        f"last={r['last']:>8.2f}  "
-        f"pred={r['pred']:>8.2f}  "
+        f"last={r['last']}  "
+        f"pred={r['pred']}  "
         f"Δ%={color_num_delta(dpct_val):>7}  "
         f"MAPE={color_num_mape(r['cv']*100):>7}  "
         f"dir_acc={color_num_diracc(r['acc']):>7}  "
@@ -491,15 +491,17 @@ async def run_once(symbol: str, *, compact=False):
         if not r:
             continue
         dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
+        # >>> Unformatted raw values for last and pred in logs <<<
         summary_lines.append(
-            f"[{tf}] last={r['last']:.2f}  pred={r['pred']:.2f}  Δ%={dpct_val:.2f}  "
+            f"[{tf}] last={r['last']}  pred={r['pred']}  Δ%={dpct_val:.2f}  "
             f"MAPE={(r['cv']*100):.2f}%  dir_acc={(r['acc']):.2f}%  conf={r['conf']:.2f}%  "
             f"signal={r['sig']}"
         )
+        # >>> Unformatted raw numbers for last & pred in CSV <<<
         csv_rows.append({
             "generated_at_utc": now_str, "exec_time_s": round(duration, 2),
             "timeframe": tf, "symbol": SYMBOL,
-            "last": round(r["last"], 2), "pred": round(r["pred"], 2),
+            "last": r["last"], "pred": r["pred"],
             "delta_pct": round(dpct_val, 2),
             "mape_pct": round(r['cv']*100.0, 2), "dir_acc_pct": round(r['acc'], 2),
             "conf_pct": round(r['conf'], 2), "signal": r["sig"],
