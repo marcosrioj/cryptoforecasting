@@ -1,7 +1,9 @@
-import asyncio, os, platform, warnings, aiohttp, time
+# cryptoforecast.py
+#!/usr/bin/env python3
+import asyncio, os, platform, warnings, aiohttp, time, argparse
 import numpy as np, pandas as pd
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Tuple, List
+from typing import Dict, List
 from pathlib import Path
 
 from ta.momentum import RSIIndicator, StochRSIIndicator
@@ -17,22 +19,22 @@ from colorama import init as colorama_init, Fore, Style
 warnings.filterwarnings("ignore")
 colorama_init(autoreset=True)
 
-# ===================== CONFIG =====================
-SYMBOL = "ETHUSDT"
+# ===================== DEFAULT CONFIG =====================
+SYMBOL   = "BTCUSDT"
 CATEGORY = "linear"
 TIMEFRAMES = {"1w": "W", "1d": "D", "4h": "240", "1h": "60", "5m": "5"}
-LIMITS = {"1w": 520, "1d": 1500, "4h": 1500, "1h": 1500, "5m": 1500}
+ORDERED_TF = ["1w","1d","4h","1h","5m"]
+LIMITS     = {"1w": 520, "1d": 1500, "4h": 1500, "1h": 1500, "5m": 1500}
 BUY_BPS, SELL_BPS = 10, -10
 WEIGHTS = {"1w": 5, "1d": 4, "4h": 3, "1h": 2, "5m": 1}
 MIN_ROWS, SEED = 200, 42
-# Ensemble weights
 W_PRICE, W_RET_LGB, W_RET_EN = 0.5, 0.3, 0.2
-# ==================================================
+# ==========================================================
 
 GREEN = Fore.GREEN + Style.BRIGHT
-RED = Fore.RED + Style.BRIGHT
-YELL = Fore.YELLOW + Style.BRIGHT
-CYAN = Fore.CYAN + Style.BRIGHT
+RED   = Fore.RED   + Style.BRIGHT
+YELL  = Fore.YELLOW+ Style.BRIGHT
+CYAN  = Fore.CYAN  + Style.BRIGHT
 WHITE = Style.BRIGHT
 RESET = Style.RESET_ALL
 
@@ -40,26 +42,27 @@ def clear_console():
     os.system("cls" if platform.system().lower().startswith("win") else "clear")
 
 # ---------- LOG/CSV PATHS ----------
-def _base_log_dir() -> Path:
-    return Path(__file__).resolve().with_suffix("").name and Path(Path(__file__).resolve().with_suffix("").name)
+def _script_base_name() -> str:
+    return Path(__file__).resolve().with_suffix("").name
 
-def _log_path(now_utc: datetime) -> Path:
-    base = _base_log_dir()
-    year = now_utc.strftime("%Y"); month = now_utc.strftime("%m")
-    week = f"{now_utc.isocalendar().week:02d}"; day  = now_utc.strftime("%d")
+def _log_path(now_utc: datetime, symbol: str) -> Path:
+    base = Path("logs") / _script_base_name() / symbol.upper()
     fname = now_utc.strftime("%Y-%m-%d_%H-%M-%S") + ".log"
-    return base / year / month / week / day / fname
+    return base / fname
 
 def _csv_path() -> Path:
-    return _base_log_dir() / "summary.csv"
+    return Path(_script_base_name()) / "summary.csv"
 
-def _write_summary_log(text: str, now_utc: datetime) -> None:
-    path = _log_path(now_utc); path.parent.mkdir(parents=True, exist_ok=True)
+def _write_summary_log(text: str, now_utc: datetime, symbol: str) -> None:
+    path = _log_path(now_utc, symbol)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
 def _append_csv(rows: List[dict]) -> None:
-    csv_path = _csv_path(); csv_path.parent.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(rows); header = not csv_path.exists()
+    csv_path = _csv_path()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(rows)
+    header = not csv_path.exists()
     df.to_csv(csv_path, mode="a", index=False, header=header, encoding="utf-8")
 
 # --------- Time alignment ----------
@@ -86,9 +89,9 @@ def trim_to_last_closed(df: pd.DataFrame, code: str) -> pd.DataFrame:
     return df[df["ts"] <= cutoff].sort_values("ts").reset_index(drop=True)
 
 # --------- Fetch ----------
-async def fetch_kline(session, interval_code: str, limit: int) -> pd.DataFrame:
+async def fetch_kline(session, interval_code: str, limit: int, symbol: str) -> pd.DataFrame:
     url = "https://api.bybit.com/v5/market/kline"
-    params = {"category": CATEGORY, "symbol": SYMBOL, "interval": interval_code, "limit": limit}
+    params = {"category": CATEGORY, "symbol": symbol, "interval": interval_code, "limit": limit}
     async with session.get(url, params=params, timeout=30) as resp:
         data = await resp.json()
         rows = data.get("result", {}).get("list", [])
@@ -99,9 +102,9 @@ async def fetch_kline(session, interval_code: str, limit: int) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         return df.dropna()[["ts","open","high","low","close","volume","turnover"]].sort_values("ts").reset_index(drop=True)
 
-async def fetch_all_tf() -> Dict[str, pd.DataFrame]:
+async def fetch_all_tf(symbol: str) -> Dict[str, pd.DataFrame]:
     async with aiohttp.ClientSession() as s:
-        tasks = [fetch_kline(s, iv, LIMITS[tf]) for tf, iv in TIMEFRAMES.items()]
+        tasks = [fetch_kline(s, iv, LIMITS[tf], symbol) for tf, iv in TIMEFRAMES.items()]
         res = await asyncio.gather(*tasks, return_exceptions=True)
     return {tf: r for (tf,_), r in zip(TIMEFRAMES.items(), res)}
 
@@ -145,8 +148,7 @@ def ts_cv_metrics(X, y):
 
 def fit_predict_ensemble(df_feat, last_close):
     X = df_feat.drop(columns=["y_next_close","y_next_ret_pct","ts","start"], errors="ignore").select_dtypes(include=[np.number])
-    y_close = df_feat["y_next_close"]
-    y_ret = df_feat["y_next_ret_pct"]
+    y_close = df_feat["y_next_close"]; y_ret = df_feat["y_next_ret_pct"]
     cv_mape, dir_acc = ts_cv_metrics(X, y_close)
 
     mdl_a = lgb.LGBMRegressor(n_estimators=800, learning_rate=0.03, objective="mape", random_state=SEED)
@@ -164,56 +166,105 @@ def fit_predict_ensemble(df_feat, last_close):
     weights = np.array([W_PRICE, W_RET_LGB, W_RET_EN]); weights /= weights.sum()
     pred_ens = float(np.dot(weights, preds))
     ens_std = float(np.std(preds))
-
-    # provide individual predictions for AI signals
     preds_dict = {"A": pred_a, "B": pred_b, "C": pred_c, "ENS": pred_ens}
     return pred_ens, cv_mape, dir_acc, ens_std, preds_dict
 
-def decide_signal_from_prices(pred_price, last_price) -> str:
-    dpct = (pred_price - last_price) / last_price * 100.0
-    bps = dpct * 100.0
-    if bps >= BUY_BPS: return "BUY"
-    if bps <= SELL_BPS: return "SELL"
-    return "FLAT"
-
-def decide_signal(dpct): 
+def decide_signal(dpct):
     bps = dpct * 100
     if bps >= BUY_BPS: return "BUY"
     if bps <= SELL_BPS: return "SELL"
     return "FLAT"
 
-def color(sig): return GREEN if sig=="BUY" else RED if sig=="SELL" else YELL
-
 def overlay_with_rsi_macd(sig, rsi, macd_diff, last_price):
     if 45 <= rsi <= 55 and abs(macd_diff)/max(last_price,1e-9) < 5e-4: return "FLAT"
     return sig
 
-# ---- Indicator signal helpers ----
-def rsi_signal(v):   return "OB" if v >= 70 else ("OS" if v <= 30 else "NEU")
-def macd_signal(v):  return "BULL" if v > 0 else ("BEAR" if v < 0 else "NEU")
-def ema_trend(short, long): 
-    return "UP" if short > long else ("DOWN" if short < long else "NEU")
-def bb_pos(close, bb_l, bb_m, bb_h):
-    if close >= bb_h: return "UPPER"
-    if close <= bb_l: return "LOWER"
-    return "MIDDLE"
-def atr_level(atr, close):
-    # normalize ATR% of price; >1.5% considered high
-    return "HIGH" if (atr / max(close,1e-9)) * 100.0 >= 1.5 else "NORMAL"
-def stoch_signal(k): return "OB" if k >= 80 else ("OS" if k <= 20 else "NEU")
-def mfi_signal(v):   return "OB" if v >= 80 else ("OS" if v <= 20 else "NEU")
-def obv_trend(obv_series):
-    if len(obv_series) < 6: return "NEU"
-    return "UP" if obv_series.iloc[-1] > obv_series.iloc[-6] else ("DOWN" if obv_series.iloc[-1] < obv_series.iloc[-6] else "NEU")
+# ---------- color helpers ----------
+def bias_color(bias: str) -> str:
+    return GREEN if bias == "BUY" else RED if bias == "SELL" else YELL
+
+def paint_val(val_str: str, bias: str) -> str:
+    return f"{bias_color(bias)}{val_str}{RESET}"
+
+def color_num_delta(dpct: float) -> str:
+    sig = decide_signal(dpct)
+    return paint_val(f"{dpct:.2f}", sig)
+
+def color_num_mape(mape_pct: float) -> str:
+    if mape_pct < 5: bias="BUY"
+    elif mape_pct <= 15: bias="FLAT"
+    else: bias="SELL"
+    return paint_val(f"{mape_pct:.2f}%", bias)
+
+def color_num_diracc(dir_acc_pct: float) -> str:
+    if dir_acc_pct >= 60: bias="BUY"
+    elif dir_acc_pct >= 50: bias="FLAT"
+    else: bias="SELL"
+    return paint_val(f"{dir_acc_pct:.2f}%", bias)
+
+def color_num_rsi(rsi: float) -> str:
+    if rsi < 30: bias="BUY"
+    elif rsi > 70: bias="SELL"
+    else: bias="FLAT"
+    return paint_val(f"{rsi:.2f}", bias)
+
+def color_num_macd(macd_hist: float, last_price: float) -> str:
+    near = abs(macd_hist) / max(last_price,1e-9) < 5e-4
+    if near: bias="FLAT"
+    elif macd_hist > 0: bias="BUY"
+    else: bias="SELL"
+    return paint_val(f"{macd_hist:.2f}", bias)
+
+def color_num_conf(conf_pct: float) -> str:
+    if conf_pct >= 85: bias="BUY"
+    elif conf_pct >= 60: bias="FLAT"
+    else: bias="SELL"
+    return paint_val(f"{conf_pct:.2f}%", bias)
+
+def color_num_ema_diff(pct: float) -> str:
+    bias = "BUY" if pct > 0 else "SELL" if pct < 0 else "FLAT"
+    if abs(pct) < 0.05: bias = "FLAT"
+    return paint_val(f"{pct:.2f}%", bias)
+
+def color_num_bb_pos(pct: float) -> str:
+    if pct <= 20: bias="BUY"
+    elif pct >= 80: bias="SELL"
+    else: bias="FLAT"
+    return paint_val(f"{pct:.2f}%", bias)
+
+def color_num_bb_width(pct: float) -> str:
+    return paint_val(f"{pct:.2f}%", "FLAT")
+
+def color_num_atr_pct(pct: float) -> str:
+    return paint_val(f"{pct:.2f}%", "FLAT")
+
+def color_num_stoch(k: float) -> str:
+    if k <= 20: bias="BUY"
+    elif k >= 80: bias="SELL"
+    else: bias="FLAT"
+    return paint_val(f"{k:.2f}", bias)
+
+def color_num_mfi(v: float) -> str:
+    if v <= 20: bias="BUY"
+    elif v >= 80: bias="SELL"
+    else: bias="FLAT"
+    return paint_val(f"{v:.2f}", bias)
+
+def color_num_obv_slope(pct: float) -> str:
+    if abs(pct) < 0.10: bias="FLAT"
+    elif pct > 0: bias="BUY"
+    else: bias="SELL"
+    return paint_val(f"{pct:.2f}%", bias)
 
 # --------- Core run ---------
-async def run_once():
+async def run_once(symbol: str):
     start_time = time.perf_counter()
 
-    raw = await fetch_all_tf()
+    raw = await fetch_all_tf(symbol)
     results = {}
     for tf, data in raw.items():
-        if isinstance(data, Exception) or data.empty: continue
+        if isinstance(data, Exception) or not isinstance(data, pd.DataFrame) or data.empty:
+            continue
         code = TIMEFRAMES[tf]
         data = trim_to_last_closed(data, code)
         if len(data) < MIN_ROWS: continue
@@ -229,51 +280,77 @@ async def run_once():
         sig = overlay_with_rsi_macd(base_sig, rsi_v, macd_hist, last)
         conf = max(5.0, min(95.0, (1.0 - cv)*100.0 - (ens_std/last)*100.0))
 
-        # indicator signals
         ema_s, ema_l = float(feat["ema_3"].iloc[-1]), float(feat["ema_24"].iloc[-1])
         bb_l, bb_m, bb_h = float(feat["bb_l"].iloc[-1]), float(feat["bb_m"].iloc[-1]), float(feat["bb_h"].iloc[-1])
         atr_v = float(feat["atr_14"].iloc[-1]); stoch_k = float(feat["stoch_k"].iloc[-1])
         mfi_v = float(feat["mfi_14"].iloc[-1])
-        obv_sig = obv_trend(feat["obv"])
 
-        ind_sig = {
-            "rsi":  rsi_signal(rsi_v),
-            "macd": macd_signal(macd_hist),
-            "ema":  ema_trend(ema_s, ema_l),
-            "bb":   bb_pos(last, bb_l, bb_m, bb_h),
-            "atr":  atr_level(atr_v, last),
-            "stoch": stoch_signal(stoch_k),
-            "mfi":  mfi_signal(mfi_v),
-            "obv":  obv_sig
+        ema_diff_pct = (ema_s - ema_l) / max(ema_l, 1e-9) * 100.0
+        bb_pos_pct   = (last - bb_l) / max((bb_h - bb_l), 1e-9) * 100.0
+        bb_width_pct = (bb_h - bb_l) / max(last, 1e-9) * 100.0
+        atr_pct      = atr_v / max(last, 1e-9) * 100.0
+        stoch_k_val  = float(stoch_k)
+        mfi_val      = float(mfi_v)
+        obv_prev     = float(feat["obv"].iloc[-6]) if len(feat["obv"]) >= 6 else float(feat["obv"].iloc[0])
+        obv_last     = float(feat["obv"].iloc[-1])
+        denom        = abs(obv_prev) if abs(obv_prev) > 1e-9 else 1.0
+        obv_slope_pct= (obv_last - obv_prev) / denom * 100.0
+
+        ai_deltas = {
+            "A":   (preds["A"]   - last) / last * 100.0,
+            "B":   (preds["B"]   - last) / last * 100.0,
+            "C":   (preds["C"]   - last) / last * 100.0,
+            "ENS": (preds["ENS"] - last) / last * 100.0,
         }
-
-        # AI per-model signals
-        ai_A = decide_signal_from_prices(preds["A"], last)
-        ai_B = decide_signal_from_prices(preds["B"], last)
-        ai_C = decide_signal_from_prices(preds["C"], last)
-        ai_ens = decide_signal_from_prices(preds["ENS"], last)
+        ai_A = decide_signal(ai_deltas["A"])
+        ai_B = decide_signal(ai_deltas["B"])
+        ai_C = decide_signal(ai_deltas["C"])
+        ai_ens = decide_signal(ai_deltas["ENS"])
         ai_agree = sum(s in ("BUY","SELL") and s == ai_ens for s in [ai_A, ai_B, ai_C])
         overlay_applied = "Yes" if sig != base_sig else "No"
 
         results[tf] = {
             "last": last, "pred": pred, "dpct": dpct,
-            "cv": cv, "acc": acc*100.0,
-            "rsi": rsi_v, "macd": macd_hist,
-            "sig": sig, "conf": conf,
-            "ind_sig": ind_sig,
-            "ai": {"A": ai_A, "B": ai_B, "C": ai_C, "ENS": ai_ens, "agree": ai_agree, "overlay": overlay_applied}
+            "cv": cv, "acc": acc*100.0, "conf": conf,
+            "rsi": rsi_v, "macd": macd_hist, "sig": sig,
+            "nums": {
+                "ema_diff_pct": ema_diff_pct, "bb_pos_pct": bb_pos_pct, "bb_width_pct": bb_width_pct,
+                "atr_pct": atr_pct, "stoch_k": stoch_k_val, "mfi": mfi_val, "obv_slope_pct": obv_slope_pct
+            },
+            "ai": {"A": ai_A, "B": ai_B, "C": ai_C, "ENS": ai_ens, "agree": ai_agree, "overlay": overlay_applied},
+            "ai_deltas": ai_deltas
         }
 
+    # vote & overall
     vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
                for tf,r in results.items())
     overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
 
-    end_time = time.perf_counter(); duration = end_time - start_time
+    duration = time.perf_counter() - start_time
 
-    # ---------- Build printable SUMMARY ----------
+    # ---------- SUMMARY ----------
     now_utc = datetime.now(timezone.utc); now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    clear_console()
+    print(f"{WHITE}SUMMARY{RESET}")
+    print(f"{WHITE}symbol:{RESET} {SYMBOL}  {WHITE}category:{RESET} {CATEGORY}  {WHITE}generated_at:{RESET} {CYAN}{now_str}{RESET}")
+    print(f"{WHITE}thresholds_bps:{RESET} buy>={BUY_BPS}, sell<={SELL_BPS}")
+    print(f"{WHITE}weights:{RESET} {WEIGHTS}")
+    print(f"{WHITE}execution_time_seconds:{RESET} {duration:.2f}\n")
 
-    # Plain-text log (SUMMARY-only)
+    # ===== OVERALL FIRST =====
+    print(f"{WHITE}[OVERALL]{RESET}")
+    tf_signals_colored = []
+    for tf in ORDERED_TF:
+        if tf in results:
+            tf_sig = results[tf]["sig"]
+            tf_signals_colored.append(f"{tf}:{bias_color(tf_sig)}{tf_sig}{RESET}")
+    vote_bias = "BUY" if vote > 0 else "SELL" if vote < 0 else "FLAT"
+    vote_colored = paint_val(str(vote), vote_bias)
+    print(f"signals={{{', '.join(tf_signals_colored)}}}")
+    print(f"weights={WEIGHTS}  vote={vote_colored}")
+    print(f"Signal={bias_color(overall)}{overall}{RESET}\n")
+
+    # prepare log header
     summary_lines = [
         "SUMMARY",
         f"symbol: {SYMBOL}  category: {CATEGORY}  generated_at: {now_str}",
@@ -282,145 +359,98 @@ async def run_once():
         f"execution_time_seconds: {duration:.2f}",
         ""
     ]
-
-    # Console SUMMARY
-    clear_console()
-    print(f"{WHITE}SUMMARY{RESET}")
-    print(f"{WHITE}symbol:{RESET} {SYMBOL}  {WHITE}category:{RESET} {CATEGORY}  {WHITE}generated_at:{RESET} {CYAN}{now_str}{RESET}")
-    print(f"{WHITE}thresholds_bps:{RESET} buy>={BUY_BPS}, sell<={SELL_BPS}")
-    print(f"{WHITE}weights:{RESET} {WEIGHTS}")
-    print(f"{WHITE}execution_time_seconds:{RESET} {duration:.2f}\n")
-
-    # CSV rows
     csv_rows: List[dict] = []
 
-    # Per-timeframe printing (numbers), then signals line
-    for tf in ["1w","1d","4h","1h","5m"]:
+    # ===== PER-TIMEFRAME BLOCKS =====
+    for tf in ORDERED_TF:
         r = results.get(tf)
-        if not r: continue
-        clr = color(r["sig"])
-        print(f"{WHITE}[{tf}]{RESET} "
-              f"last={r['last']:.2f}  pred={r['pred']:.2f}  Δ%={r['dpct']:.2f}  "
-              f"MAPE={r['cv']*100:.2f}%  dir_acc={r['acc']:.2f}%  "
-              f"RSI14={r['rsi']:.2f}  MACD_hist={r['macd']:.2f}  conf={r['conf']:.2f}%  "
-              f"signal={clr}{r['sig']}{RESET}")
+        if not r: 
+            continue
 
-        # Signals/Results line (console only)
-        isg = r["ind_sig"]; ai = r["ai"]
-        print(f"    ind=[rsi:{isg['rsi']}, macd:{isg['macd']}, ema:{isg['ema']}, "
-              f"bb:{isg['bb']}, atr:{isg['atr']}, stoch:{isg['stoch']}, mfi:{isg['mfi']}, obv:{isg['obv']}]  "
-              f"AI=[A:{ai['A']}, B:{ai['B']}, C:{ai['C']}, ens:{ai['ENS']}, agree={ai['agree']}/3, overlay={ai['overlay']}]")
+        dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
+        print(f"{WHITE}[{tf}]{RESET}")
+        print(f"last={r['last']:.2f}  pred={r['pred']:.2f}  "
+              f"Δ%={color_num_delta(dpct_val)}  "
+              f"MAPE={color_num_mape(r['cv']*100)}  "
+              f"dir_acc={color_num_diracc(r['acc'])} "
+              f"conf={color_num_conf(r['conf'])}")
 
-        # Add to plain text log (numbers only)
-        summary_lines.append(
-            f"[{tf}] last={r['last']:.2f}  pred={r['pred']:.2f}  Δ%={r['dpct']:.2f}  "
-            f"MAPE={(r['cv']*100):.2f}%  dir_acc={(r['acc']):.2f}%  RSI14={r['rsi']:.2f}  "
-            f"MACD_hist={r['macd']:.2f}  conf={r['conf']:.2f}%  signal={r['sig']}"
+        nums = r["nums"]
+        print(
+            "ind=["
+            + ", ".join([
+                f"rsi14:{color_num_rsi(r['rsi'])}",
+                f"macd:{color_num_macd(r['macd'], r['last'])}",
+                f"ema_diff%:{color_num_ema_diff(nums['ema_diff_pct'])}",
+                f"bb_pos%:{color_num_bb_pos(nums['bb_pos_pct'])}",
+                f"bb_width%:{color_num_bb_width(nums['bb_width_pct'])}",
+                f"atr%:{color_num_atr_pct(nums['atr_pct'])}",
+                f"stoch_k:{color_num_stoch(nums['stoch_k'])}",
+                f"mfi:{color_num_mfi(nums['mfi'])}",
+                f"obv_slope%:{color_num_obv_slope(nums['obv_slope_pct'])}",
+            ])
+            + "]"
         )
 
-        # CSV row (include signals)
+        ai_d = r["ai_deltas"]; ai = r["ai"]
+        ai_tokens = [f"{name}:{color_num_delta(ai_d[name])}%" for name in ["A","B","C","ENS"]]
+        agree_bias = "BUY" if ai["agree"] == 3 else "FLAT" if ai["agree"] == 2 else "SELL"
+        agree_colored = paint_val(f"{ai['agree']}/3", agree_bias)
+        overlay_str = f"{YELL}{ai['overlay']}{RESET}"
+        print(f"AI=[{', '.join(ai_tokens)}, agree={agree_colored}, overlay={overlay_str}]")
+
+        print(f"Signal={bias_color(r['sig'])}{r['sig']}{RESET}\n")
+
+        # log line (plain)
+        summary_lines.append(
+            f"[{tf}] last={r['last']:.2f}  pred={r['pred']:.2f}  Δ%={dpct_val:.2f}  "
+            f"MAPE={(r['cv']*100):.2f}%  dir_acc={(r['acc']):.2f}%  conf={r['conf']:.2f}%  "
+            f"signal={r['sig']}"
+        )
+
+        # CSV
         csv_rows.append({
-            "generated_at_utc": now_str,
-            "exec_time_s": round(duration, 2),
-            "timeframe": tf,
-            "symbol": SYMBOL,
-            "last": round(r["last"], 2),
-            "pred": round(r["pred"], 2),
-            "delta_pct": round(r["dpct"], 2),
-            "mape_pct": round(r["cv"]*100.0, 2),
-            "dir_acc_pct": round(r["acc"], 2),
-            "rsi14": round(r["rsi"], 2),
-            "macd_hist": round(r["macd"], 2),
-            "conf_pct": round(r["conf"], 2),
-            "signal": r["sig"],
-            "vote": vote,
-            "overall_decision": overall,
-            # indicator & AI signals
-            "rsi_sig": isg["rsi"],
-            "macd_sig": isg["macd"],
-            "ema_trend": isg["ema"],
-            "bb_pos": isg["bb"],
-            "atr_level": isg["atr"],
-            "stoch_sig": isg["stoch"],
-            "mfi_sig": isg["mfi"],
-            "obv_trend": isg["obv"],
-            "ai_A": ai["A"], "ai_B": ai["B"], "ai_C": ai["C"], "ai_ens": ai["ENS"],
-            "ai_agree": ai["agree"], "overlay_applied": ai["overlay"]
+            "generated_at_utc": now_str, "exec_time_s": round(duration, 2),
+            "timeframe": tf, "symbol": SYMBOL,
+            "last": round(r["last"], 2), "pred": round(r["pred"], 2),
+            "delta_pct": round(dpct_val, 2),
+            "mape_pct": round(r['cv']*100.0, 2), "dir_acc_pct": round(r['acc'], 2),
+            "conf_pct": round(r['conf'], 2), "signal": r["sig"],
+            "vote": vote, "overall_decision": overall
         })
 
-    print(f"\n{WHITE}overall_decision:{RESET} {color(overall)}{overall}{RESET}  (vote={vote})")
+    # overall for log
     summary_lines.append("")
     summary_lines.append(f"overall_decision: {overall}  (vote={vote})")
 
-    # Persist log + CSV
-    _write_summary_log("\n".join(summary_lines) + "\n", now_utc)
+    # persist
+    _write_summary_log("\n".join(summary_lines) + "\n", now_utc, SYMBOL)
     _append_csv(csv_rows)
 
-    # Console-only LEGEND and AI sections
-    print()
-    print(f"{WHITE}LEGEND (how to read each metric and signal):{RESET}")
-    print(f"  Δ% → Predicted percentage change in price vs. last close.")
-    print(f"        • Positive = potential upside (BUY bias)")
-    print(f"        • Negative = potential downside (SELL bias)")
-    print(f"  MAPE → Mean Absolute Percentage Error — historical prediction error of the model.")
-    print(f"        • Lower values = higher model accuracy (confidence improves when <5%).")
-    print(f"  dir_acc → Directional accuracy (% of times model correctly predicted up/down moves).")
-    print(f"        • >60% = generally good; 50% = random; <50% = poor predictive alignment.")
-    print(f"  RSI14 → Relative Strength Index (momentum).")
-    print(f"        • >70 = overbought (SELL pressure likely)")
-    print(f"        • <30 = oversold (BUY pressure likely)")
-    print(f"        • 45–55 = neutral/sideways momentum.")
-    print(f"  MACD_hist → Difference between MACD and its signal line.")
-    print(f"        • Positive = bullish momentum")
-    print(f"        • Negative = bearish momentum")
-    print(f"        • Near zero = low momentum / possible consolidation.")
-    print(f"  EMA trend → Short EMA(3) vs Long EMA(24).")
-    print(f"        • UP = short-term strength; price above long trend (BUY tendency)")
-    print(f"        • DOWN = short-term weakness (SELL tendency)")
-    print(f"        • NEU = both moving averages converging (indecision).")
-    print(f"  BB pos → Position of last close inside Bollinger Bands(20).")
-    print(f"        • UPPER = near resistance / overbought zone (SELL bias)")
-    print(f"        • LOWER = near support / oversold zone (BUY bias)")
-    print(f"        • MIDDLE = neutral zone / trend continuation likely.")
-    print(f"  ATR level → Volatility level measured by ATR(14).")
-    print(f"        • HIGH (>1.5%) = strong volatility / possible breakouts")
-    print(f"        • NORMAL = steady or ranging conditions.")
-    print(f"  StochRSI / MFI → Oscillators for short-term reversals.")
-    print(f"        • OB (Overbought) = SELL risk high")
-    print(f"        • OS (Oversold) = BUY opportunity possible")
-    print(f"        • NEU = balanced or mid-range momentum.")
-    print(f"  OBV → On-Balance Volume trend (volume-based strength).")
-    print(f"        • UP = accumulation (BUY interest)")
-    print(f"        • DOWN = distribution (SELL pressure)")
-    print(f"        • NEU = flat volume trend / uncertainty.")
-    print(f"  conf → Model confidence (%).")
-    print(f"        • Combines low error (MAPE) + high ensemble agreement.")
-    print(f"        • >85% = strong conviction; <60% = low reliability.")
-    print(f"  AI A/B/C → Signals from individual AI models:")
-    print(f"        • A = LightGBM (price prediction), B = LightGBM (return), C = ElasticNet (return).")
-    print(f"        • ens = ensemble consensus (weighted combination).")
-    print(f"        • agree = how many models match the ensemble (3/3 = strong confirmation).")
-    print(f"        • overlay = whether RSI/MACD filters adjusted the final signal to FLAT.")
-    print()
-
-
-    print(f"{WHITE}AI STRATEGIES & INDICATORS USED:{RESET}")
-    print(f"  • Machine Learning Ensemble: LGBM(price), LGBM(return→price), ElasticNet(return→price)")
-    print(f"  • Time-Series CV (walk-forward, 3 splits); numeric-only feature gating")
-    print(f"  • Closed-candle alignment; RSI/MACD overlay to avoid chop")
-    print(f"  • Confidence from low CV error + ensemble agreement")
-    print(f"  • Indicators: EMA(3,6,12,24,60), RSI(14), StochRSI, MACD(12,26,9),")
-    print(f"               Bollinger Bands(20), ATR(14), Realized Vol(12), MFI(14), OBV,")
-    print(f"               candle body/wick ratios & distances to EMAs\n")
-
-# --------- Scheduler ---------
-async def scheduler_loop():
-    await run_once()  # immediate
+# --------- Scheduler / CLI ---------
+async def scheduler_loop(loop: bool, every: int, symbol: str):
+    await run_once(symbol)  # immediate first run
+    if not loop:
+        return
     while True:
-        now = datetime.utcnow()
-        wait = 300 - ((now.minute*60 + now.second) % 300)
+        if every == 300:
+            now = datetime.utcnow()
+            wait = 300 - ((now.minute * 60 + now.second) % 300)
+        else:
+            wait = every
         await asyncio.sleep(wait)
-        await run_once()
+        await run_once(symbol)
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Bybit Multi-timeframe Forecast")
+    p.add_argument("--symbol", default=SYMBOL, help="Symbol (e.g., BTCUSDT). Default: BTCUSDT")
+    p.add_argument("--loop", action="store_true", help="Run continuously (default: single run)")
+    p.add_argument("--every", type=int, default=300, help="Seconds between runs when --loop (default: 300)")
+    p.add_argument("--category", default=CATEGORY, help="Bybit category: linear, inverse, spot (default: linear)")
+    return p.parse_args()
 
 if __name__ == "__main__":
-    asyncio.run(scheduler_loop())
+    args = parse_args()
+    SYMBOL = args.symbol.upper()
+    CATEGORY = args.category
+    asyncio.run(scheduler_loop(loop=args.loop, every=args.every, symbol=SYMBOL))
