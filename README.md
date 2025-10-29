@@ -9,25 +9,30 @@ A multi-timeframe crypto forecaster with improved console UX:
 - Technical Indicators: RSI, MACD, EMA(3/24), Bollinger Bands(20), ATR(14), StochRSI, MFI, OBV
 - Colorized console output for NUMBERS ONLY (green = BUY, yellow = FLAT, red = SELL)
 - Enhanced readability: banners, dividers, icons, aligned columns, grouped sections
-- **Timeframe title now includes the Signal** → e.g., `[1w]  - Signal: SELL`
+- **Timeframe title includes the Signal** → e.g., `🕒 [1w]  - Signal: SELL`
 - Optional compact summary mode, togglable icons and colors
 
 Output order: [OVERALL] FIRST, then blocks for 1w, 1d, 4h, 1h, 5m.
 All timeframes use CLOSED CANDLES ONLY (no repaint).
 
-IMPORTANT: Weekly (1w) support is fully enabled. To ensure 1w appears for newer pairs,
-the script uses per-timeframe minimum history: 1w=30 candles, others=200.
+IMPORTANT
+---------
+- Install **scikit-learn** (not the deprecated `sklearn` package).
+- Weekly (1w) support is enabled; per-timeframe minimum history: 1w=30 candles; others=200.
 
 
 1) INSTALLATION
 ---------------
-1. Create and activate a Python virtual environment:
-   python3 -m venv .venv
-   source .venv/bin/activate
+Create and activate a Python virtual environment:
+  python3 -m venv .venv
+  source .venv/bin/activate
 
-2. Install dependencies:
-   pip install -U pip
-   pip install aiohttp numpy pandas scikit-learn lightgbm ta colorama
+Install dependencies:
+  python3 -m pip install -U pip
+  python3 -m pip install -U scikit-learn lightgbm ta aiohttp numpy pandas colorama
+
+If LightGBM build fails on Linux:
+  sudo apt-get update && sudo apt-get install -y build-essential
 
 
 2) FILES
@@ -41,67 +46,63 @@ Note: Colors apply ONLY to the console. Logs and CSV are plain (uncolored) text.
 
 3) HOW TO RUN
 -------------
-A) Run with Python directly
+A) Python directly
 
-- Single run with default pair (BTCUSDT) and default category (linear):
+Single run (BTCUSDT, linear):
   python3 cryptoforecast.py
 
-- Change symbol:
+Change symbol:
   python3 cryptoforecast.py --symbol ETHUSDT
 
-- Continuous loop aligned to 5-minute boundaries:
+Loop aligned to 5-minute boundaries:
   python3 cryptoforecast.py --loop
 
-- Continuous loop with custom cadence (e.g., every 60 seconds; not 5m aligned):
+Loop with custom cadence (e.g., every 60 seconds):
   python3 cryptoforecast.py --loop --every 60
 
-- Change Bybit category (e.g., spot, inverse):
+Change Bybit category (spot, inverse):
   python3 cryptoforecast.py --category spot
 
-- Compact summary mode (minimal screen usage):
+Compact summary mode:
   python3 cryptoforecast.py --compact
 
-- Disable colors (ANSI):
+Disable ANSI colors:
   python3 cryptoforecast.py --no-color
 
-- Disable icons/emojis:
+Disable icons/emojis:
   python3 cryptoforecast.py --no-icons
 
 
-B) Optional shell helper (run.sh)
-
-Create a run.sh with:
+B) Shell helper (cryptoforecast.sh)
+-----------------------------------
+Example script:
   #!/bin/bash
   source .venv/bin/activate
   python3 cryptoforecast.py "$@"
 
 Make it executable:
-  chmod +x run.sh
+  chmod +x cryptoforecast.sh
 
 Examples:
-  ./run.sh                          # single run, BTCUSDT, linear
-  ./run.sh --symbol MAVIAUSDT       # single run, custom pair
-  ./run.sh --loop                   # run forever, aligned to 5-minute ticks
-  ./run.sh --loop --every 60        # run forever, every 60s (not aligned)
-  ./run.sh --compact                # compact mode
-  ./run.sh --no-color               # disable ANSI colors
-  ./run.sh --no-icons               # disable icons/emojis
+  ./cryptoforecast.sh --symbol ETHUSDT
+  ./cryptoforecast.sh --loop
+  ./cryptoforecast.sh --loop --every 60
+  ./cryptoforecast.sh --compact
+  ./cryptoforecast.sh --no-color --no-icons
 
 
 4) CONSOLE OUTPUT FORMAT (ENHANCED)
 -----------------------------------
 - Header banner with aligned metadata.
 - [OVERALL] block shows per-timeframe Signals (colored words), weights, vote, and final Decision.
-- **Each timeframe title now includes Signal**:  
-  Example: `🕒 [1w]  - Signal: SELL`
-- Each timeframe block groups information into:
+- **Each timeframe title includes the Signal**:
+    e.g., `🕒 [1w]  - Signal: SELL`
+- Each timeframe block contains:
   * Metrics row (aligned): last, pred, Δ%, MAPE, dir_acc, conf
   * Indicators row: RSI14, MACD, EMAΔ%, BBpos%, BBwidth%, ATR%, StochK, MFI, OBV%
-  * AI ensemble row: A/B/C/ENS deltas (%), agree, overlay
-- Horizontal dividers between sections for scannability.
-- Optional compact summary mode (one-liners) for dashboards/bots.
+  * AI ensemble row: A/B/C/ENS deltas (%), agree (votes), overlay (if RSI/MACD neutralized)
 
-Example (full mode with 1w INCLUDED):
+Example (full mode):
   ──────────────────────────────────────────────
                 🚀 CRYPTOFORECAST SUMMARY
   ──────────────────────────────────────────────
@@ -135,13 +136,13 @@ Example (compact mode):
 
 5) LOGS AND CSV
 ----------------
-- Log file (plain text, always written on each run):
+Log file (plain text, each run):
   logs/<scriptname>/<PAIR>/<YYYY-MM-DD_HH-MM-SS>.log
-  Contains only SUMMARY lines per timeframe (including 1w when available) and the overall decision.
+  Only SUMMARY lines per timeframe and the overall decision.
 
-- Rolling CSV (plain text):
+Rolling CSV (plain text):
   <scriptname>/summary.csv
-  Appends numeric metrics and signals per timeframe for easier analysis.
+  Appends numeric metrics and signals per timeframe for analysis.
 
 
 6) NOTES & PRACTICES
@@ -153,9 +154,12 @@ Example (compact mode):
 - If throttled by Bybit, increase --every with --loop.
 - If LightGBM import fails, ensure a compatible Python version and OS-specific wheel.
 
+
 7) QUICK TROUBLESHOOTING
 ------------------------
-- No colors? Use --no-color or another terminal that supports ANSI.
-- HTTP errors? Likely network or rate limiting; retry or increase --every.
-- Pandas dtype errors? Ensure numeric features only; the script already selects numerics.
+- ImportError `sklearn.model_model_selection`: fix import to `from sklearn.model_selection import TimeSeriesSplit`.
+- Tried installing `sklearn`? Uninstall it and install **scikit-learn** instead.
+- No colors? Use --no-color or a terminal that supports ANSI.
+- HTTP errors? Network or rate limiting; retry or increase --every.
+- Pandas dtype errors? The script selects numerics already; ensure dependencies match.
 

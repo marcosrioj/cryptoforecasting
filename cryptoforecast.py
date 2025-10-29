@@ -10,7 +10,7 @@ from ta.momentum import RSIIndicator, StochRSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
-from sklearn.model_model_selection import TimeSeriesSplit
+from sklearn.model_selection import TimeSeriesSplit  # <- fixed import
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.linear_model import ElasticNet
 import lightgbm as lgb
@@ -326,7 +326,7 @@ def print_overall(signals_ordered: List[str], results: Dict[str,dict], vote: int
     print(divider())
 
 def print_timeframe_block(tf: str, r: dict):
-    # >>> CHANGED: Move Signal into the title line <<<
+    # Signal moved into the title line
     head = f"{_icon(tf)}[{tf}]  - Signal: {_color_signal_word(r['sig'])}"
     print(head)
     dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
@@ -366,8 +366,6 @@ def print_timeframe_block(tf: str, r: dict):
     if COLOR_ENABLED:
         overlay_txt = f"{YELL}{overlay_txt}{RESET}"
     print(f"AI         : {', '.join(ai_tokens)}  agree={agree_colored}  overlay={overlay_txt}")
-
-    # (Removed trailing "Signal:" line to avoid duplication)
     print(divider())
 
 def print_compact(symbol, overall, vote, order_tfs, results, dpcts):
