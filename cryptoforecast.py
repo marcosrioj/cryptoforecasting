@@ -1,6 +1,6 @@
 # cryptoforecast.py
 #!/usr/bin/env python3
-import asyncio, os, platform, warnings, aiohttp, time, argparse
+import asyncio, os, platform, warnings, aiohttp, time, argparse, shutil
 import numpy as np, pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List
@@ -10,7 +10,7 @@ from ta.momentum import RSIIndicator, StochRSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.linear_model import ElasticNet
 import lightgbm as lgb
@@ -25,21 +25,54 @@ CATEGORY = "linear"
 TIMEFRAMES = {"1w": "W", "1d": "D", "4h": "240", "1h": "60", "5m": "5"}
 ORDERED_TF = ["1w","1d","4h","1h","5m"]
 LIMITS     = {"1w": 520, "1d": 1500, "4h": 1500, "1h": 1500, "5m": 1500}
+
+# Per-timeframe minimum history (weeks often have fewer total candles)
+MIN_ROWS_TF = {"1w": 30, "1d": 200, "4h": 200, "1h": 200, "5m": 200}
+
 BUY_BPS, SELL_BPS = 10, -10
 WEIGHTS = {"1w": 5, "1d": 4, "4h": 3, "1h": 2, "5m": 1}
-MIN_ROWS, SEED = 200, 42
+SEED = 42
 W_PRICE, W_RET_LGB, W_RET_EN = 0.5, 0.3, 0.2
 # ==========================================================
 
-GREEN = Fore.GREEN + Style.BRIGHT
-RED   = Fore.RED   + Style.BRIGHT
-YELL  = Fore.YELLOW+ Style.BRIGHT
-CYAN  = Fore.CYAN  + Style.BRIGHT
-WHITE = Style.BRIGHT
-RESET = Style.RESET_ALL
+# ---- color setup (preserve previous color logic, but allow disabling) ----
+COLOR_ENABLED = True
+def _set_color(enabled: bool):
+    global COLOR_ENABLED, GREEN, RED, YELL, CYAN, WHITE, RESET
+    COLOR_ENABLED = enabled
+    if enabled:
+        GREEN = Fore.GREEN + Style.BRIGHT
+        RED   = Fore.RED   + Style.BRIGHT
+        YELL  = Fore.YELLOW+ Style.BRIGHT
+        CYAN  = Fore.CYAN  + Style.BRIGHT
+        WHITE = Style.BRIGHT
+        RESET = Style.RESET_ALL
+    else:
+        GREEN = RED = YELL = CYAN = WHITE = RESET = ""
+
+_set_color(True)
+
+# ---- icon setup (toggleable) ----
+ICONS_ENABLED = True
+ICON_OVERALL = "🧭"
+ICON_1W = "🕒"
+ICON_1D = "📅"
+ICON_4H = "⏰"
+ICON_1H = "🕐"
+ICON_5M = "⚡"
+TF_ICON = {"1w": ICON_1W, "1d": ICON_1D, "4h": ICON_4H, "1h": ICON_1H, "5m": ICON_5M}
 
 def clear_console():
     os.system("cls" if platform.system().lower().startswith("win") else "clear")
+
+def term_width(default=80):
+    try:
+        return shutil.get_terminal_size().columns
+    except Exception:
+        return default
+
+def divider(char="─"):
+    return char * max(40, min(120, term_width()))
 
 # ---------- LOG/CSV PATHS ----------
 def _script_base_name() -> str:
@@ -181,9 +214,11 @@ def overlay_with_rsi_macd(sig, rsi, macd_diff, last_price):
 
 # ---------- color helpers ----------
 def bias_color(bias: str) -> str:
+    if not COLOR_ENABLED: return ""
     return GREEN if bias == "BUY" else RED if bias == "SELL" else YELL
 
 def paint_val(val_str: str, bias: str) -> str:
+    if not COLOR_ENABLED: return val_str
     return f"{bias_color(bias)}{val_str}{RESET}"
 
 def color_num_delta(dpct: float) -> str:
@@ -256,18 +291,116 @@ def color_num_obv_slope(pct: float) -> str:
     else: bias="SELL"
     return paint_val(f"{pct:.2f}%", bias)
 
+# ---------- pretty printing helpers ----------
+def _icon(tf: str) -> str:
+    if not ICONS_ENABLED: return ""
+    if tf == "OVERALL": return ICON_OVERALL + " "
+    return TF_ICON.get(tf, "") + " "
+
+def _color_signal_word(sig: str) -> str:
+    return f"{bias_color(sig)}{sig}{RESET}" if COLOR_ENABLED else sig
+
+def print_header(symbol, category, now_str, thresholds, weights, duration):
+    print(divider())
+    print(("🚀 CRYPTOFORECAST SUMMARY" if ICONS_ENABLED else "CRYPTOFORECAST SUMMARY").center(max(40, min(80, term_width()))))
+    print(divider())
+    print(f"Symbol     : {symbol}")
+    print(f"Category   : {category}")
+    print(f"Generated  : {now_str}")
+    print(f"Thresholds : BUY ≥ +{thresholds['buy_bps']} bps | SELL ≤ {thresholds['sell_bps']} bps")
+    wtxt = ", ".join([f"{k}={v}" for k,v in weights.items()])
+    print(f"Weights    : {wtxt}")
+    print(f"Exec time  : {duration:.2f} s")
+    print(divider())
+
+def print_overall(signals_ordered: List[str], results: Dict[str,dict], vote: int, overall: str):
+    print(("🧭 " if ICONS_ENABLED else "") + "[OVERALL]")
+    parts = []
+    for tf in signals_ordered:
+        if tf in results:
+            sig = results[tf]["sig"]
+            parts.append(f"{tf}:{_color_signal_word(sig)}")
+    print(f"Signals    : {', '.join(parts)}")
+    print(f"Weights    : {WEIGHTS}  Vote: {_color_signal_word('BUY' if vote>0 else 'SELL' if vote<0 else 'FLAT')} ({vote})")
+    print(f"Decision   : {_color_signal_word(overall)}")
+    print(divider())
+
+def print_timeframe_block(tf: str, r: dict):
+    # >>> CHANGED: Move Signal into the title line <<<
+    head = f"{_icon(tf)}[{tf}]  - Signal: {_color_signal_word(r['sig'])}"
+    print(head)
+    dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
+    row1 = (
+        f"last={r['last']:>8.2f}  "
+        f"pred={r['pred']:>8.2f}  "
+        f"Δ%={color_num_delta(dpct_val):>7}  "
+        f"MAPE={color_num_mape(r['cv']*100):>7}  "
+        f"dir_acc={color_num_diracc(r['acc']):>7}  "
+        f"conf={color_num_conf(r['conf']):>7}"
+    )
+    print(row1)
+
+    nums = r["nums"]
+    ind_line = (
+        "Indicators : "
+        + ", ".join([
+            f"RSI14={color_num_rsi(r['rsi'])}",
+            f"MACD={color_num_macd(r['macd'], r['last'])}",
+            f"EMAΔ%={color_num_ema_diff(nums['ema_diff_pct'])}",
+            f"BBpos%={color_num_bb_pos(nums['bb_pos_pct'])}",
+            f"BBwidth%={color_num_bb_width(nums['bb_width_pct'])}",
+            f"ATR%={color_num_atr_pct(nums['atr_pct'])}",
+            f"StochK={color_num_stoch(nums['stoch_k'])}",
+            f"MFI={color_num_mfi(nums['mfi'])}",
+            f"OBV%={color_num_obv_slope(nums['obv_slope_pct'])}",
+        ])
+    )
+    print(ind_line)
+
+    ai_d = r["ai_deltas"]; ai = r["ai"]
+    ai_tokens = [f"{name}={color_num_delta(ai_d[name])}%" for name in ["A","B","C","ENS"]]
+    agree_txt = f"{ai['agree']}/3"
+    agree_bias = "BUY" if ai["agree"] == 3 else "FLAT" if ai["agree"] == 2 else "SELL"
+    agree_colored = paint_val(agree_txt, agree_bias)
+    overlay_txt = ai["overlay"]
+    if COLOR_ENABLED:
+        overlay_txt = f"{YELL}{overlay_txt}{RESET}"
+    print(f"AI         : {', '.join(ai_tokens)}  agree={agree_colored}  overlay={overlay_txt}")
+
+    # (Removed trailing "Signal:" line to avoid duplication)
+    print(divider())
+
+def print_compact(symbol, overall, vote, order_tfs, results, dpcts):
+    print(divider())
+    title = (f"🧭 {symbol}: {overall} (vote={vote})" if ICONS_ENABLED else f"{symbol}: {overall} (vote={vote})")
+    print(title)
+    parts = []
+    for tf in order_tfs:
+        if tf in results:
+            parts.append(f"{tf}={results[tf]['sig']}")
+    print("TF Signals : " + ", ".join(parts))
+    dpct_parts = []
+    for tf in order_tfs:
+        if tf in dpcts:
+            dpct_val = dpcts[tf]
+            dpct_parts.append(f"{tf}:{dpct_val:.2f}%")
+    print("Δ%         : " + " | ".join(dpct_parts))
+    print(divider())
+
 # --------- Core run ---------
-async def run_once(symbol: str):
+async def run_once(symbol: str, *, compact=False):
     start_time = time.perf_counter()
 
     raw = await fetch_all_tf(symbol)
     results = {}
+    dpcts_tmp = {}
     for tf, data in raw.items():
         if isinstance(data, Exception) or not isinstance(data, pd.DataFrame) or data.empty:
             continue
         code = TIMEFRAMES[tf]
         data = trim_to_last_closed(data, code)
-        if len(data) < MIN_ROWS: continue
+        if len(data) < MIN_ROWS_TF.get(tf, 200):
+            continue
         feat = make_features(data)
         if feat.empty: continue
 
@@ -276,6 +409,7 @@ async def run_once(symbol: str):
         rsi_v, macd_hist = float(feat["rsi_14"].iloc[-1]), float(feat["macd_diff"].iloc[-1])
 
         dpct = (pred - last) / last * 100
+        dpcts_tmp[tf] = dpct
         base_sig = decide_signal(dpct)
         sig = overlay_with_rsi_macd(base_sig, rsi_v, macd_hist, last)
         conf = max(5.0, min(95.0, (1.0 - cv)*100.0 - (ens_std/last)*100.0))
@@ -328,29 +462,22 @@ async def run_once(symbol: str):
 
     duration = time.perf_counter() - start_time
 
-    # ---------- SUMMARY ----------
+    # ---------- SUMMARY PRINT ----------
     now_utc = datetime.now(timezone.utc); now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
     clear_console()
-    print(f"{WHITE}SUMMARY{RESET}")
-    print(f"{WHITE}symbol:{RESET} {SYMBOL}  {WHITE}category:{RESET} {CATEGORY}  {WHITE}generated_at:{RESET} {CYAN}{now_str}{RESET}")
-    print(f"{WHITE}thresholds_bps:{RESET} buy>={BUY_BPS}, sell<={SELL_BPS}")
-    print(f"{WHITE}weights:{RESET} {WEIGHTS}")
-    print(f"{WHITE}execution_time_seconds:{RESET} {duration:.2f}\n")
 
-    # ===== OVERALL FIRST =====
-    print(f"{WHITE}[OVERALL]{RESET}")
-    tf_signals_colored = []
-    for tf in ORDERED_TF:
-        if tf in results:
-            tf_sig = results[tf]["sig"]
-            tf_signals_colored.append(f"{tf}:{bias_color(tf_sig)}{tf_sig}{RESET}")
-    vote_bias = "BUY" if vote > 0 else "SELL" if vote < 0 else "FLAT"
-    vote_colored = paint_val(str(vote), vote_bias)
-    print(f"signals={{{', '.join(tf_signals_colored)}}}")
-    print(f"weights={WEIGHTS}  vote={vote_colored}")
-    print(f"Signal={bias_color(overall)}{overall}{RESET}\n")
+    thresholds = {"buy_bps": BUY_BPS, "sell_bps": SELL_BPS}
+    print_header(SYMBOL, CATEGORY, now_str, thresholds, WEIGHTS, duration)
 
-    # prepare log header
+    if compact:
+        print_compact(SYMBOL, overall, vote, ORDERED_TF, results, dpcts_tmp)
+    else:
+        print_overall(ORDERED_TF, results, vote, overall)
+        for tf in ORDERED_TF:
+            r = results.get(tf)
+            if r: print_timeframe_block(tf, r)
+
+    # ---------- SUMMARY LOG & CSV (plain text) ----------
     summary_lines = [
         "SUMMARY",
         f"symbol: {SYMBOL}  category: {CATEGORY}  generated_at: {now_str}",
@@ -361,54 +488,16 @@ async def run_once(symbol: str):
     ]
     csv_rows: List[dict] = []
 
-    # ===== PER-TIMEFRAME BLOCKS =====
     for tf in ORDERED_TF:
         r = results.get(tf)
-        if not r: 
+        if not r:
             continue
-
         dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
-        print(f"{WHITE}[{tf}]{RESET}")
-        print(f"last={r['last']:.2f}  pred={r['pred']:.2f}  "
-              f"Δ%={color_num_delta(dpct_val)}  "
-              f"MAPE={color_num_mape(r['cv']*100)}  "
-              f"dir_acc={color_num_diracc(r['acc'])} "
-              f"conf={color_num_conf(r['conf'])}")
-
-        nums = r["nums"]
-        print(
-            "ind=["
-            + ", ".join([
-                f"rsi14:{color_num_rsi(r['rsi'])}",
-                f"macd:{color_num_macd(r['macd'], r['last'])}",
-                f"ema_diff%:{color_num_ema_diff(nums['ema_diff_pct'])}",
-                f"bb_pos%:{color_num_bb_pos(nums['bb_pos_pct'])}",
-                f"bb_width%:{color_num_bb_width(nums['bb_width_pct'])}",
-                f"atr%:{color_num_atr_pct(nums['atr_pct'])}",
-                f"stoch_k:{color_num_stoch(nums['stoch_k'])}",
-                f"mfi:{color_num_mfi(nums['mfi'])}",
-                f"obv_slope%:{color_num_obv_slope(nums['obv_slope_pct'])}",
-            ])
-            + "]"
-        )
-
-        ai_d = r["ai_deltas"]; ai = r["ai"]
-        ai_tokens = [f"{name}:{color_num_delta(ai_d[name])}%" for name in ["A","B","C","ENS"]]
-        agree_bias = "BUY" if ai["agree"] == 3 else "FLAT" if ai["agree"] == 2 else "SELL"
-        agree_colored = paint_val(f"{ai['agree']}/3", agree_bias)
-        overlay_str = f"{YELL}{ai['overlay']}{RESET}"
-        print(f"AI=[{', '.join(ai_tokens)}, agree={agree_colored}, overlay={overlay_str}]")
-
-        print(f"Signal={bias_color(r['sig'])}{r['sig']}{RESET}\n")
-
-        # log line (plain)
         summary_lines.append(
             f"[{tf}] last={r['last']:.2f}  pred={r['pred']:.2f}  Δ%={dpct_val:.2f}  "
             f"MAPE={(r['cv']*100):.2f}%  dir_acc={(r['acc']):.2f}%  conf={r['conf']:.2f}%  "
             f"signal={r['sig']}"
         )
-
-        # CSV
         csv_rows.append({
             "generated_at_utc": now_str, "exec_time_s": round(duration, 2),
             "timeframe": tf, "symbol": SYMBOL,
@@ -419,17 +508,15 @@ async def run_once(symbol: str):
             "vote": vote, "overall_decision": overall
         })
 
-    # overall for log
     summary_lines.append("")
     summary_lines.append(f"overall_decision: {overall}  (vote={vote})")
 
-    # persist
     _write_summary_log("\n".join(summary_lines) + "\n", now_utc, SYMBOL)
     _append_csv(csv_rows)
 
 # --------- Scheduler / CLI ---------
-async def scheduler_loop(loop: bool, every: int, symbol: str):
-    await run_once(symbol)  # immediate first run
+async def scheduler_loop(loop: bool, every: int, symbol: str, *, compact=False):
+    await run_once(symbol, compact=compact)  # immediate first run
     if not loop:
         return
     while True:
@@ -439,7 +526,7 @@ async def scheduler_loop(loop: bool, every: int, symbol: str):
         else:
             wait = every
         await asyncio.sleep(wait)
-        await run_once(symbol)
+        await run_once(symbol, compact=compact)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Bybit Multi-timeframe Forecast")
@@ -447,10 +534,15 @@ def parse_args():
     p.add_argument("--loop", action="store_true", help="Run continuously (default: single run)")
     p.add_argument("--every", type=int, default=300, help="Seconds between runs when --loop (default: 300)")
     p.add_argument("--category", default=CATEGORY, help="Bybit category: linear, inverse, spot (default: linear)")
+    p.add_argument("--compact", action="store_true", help="Compact summary mode")
+    p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+    p.add_argument("--no-icons", action="store_true", help="Disable icons/emojis")
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     SYMBOL = args.symbol.upper()
     CATEGORY = args.category
-    asyncio.run(scheduler_loop(loop=args.loop, every=args.every, symbol=SYMBOL))
+    _set_color(not args.no_color)
+    ICONS_ENABLED = not args.no_icons
+    asyncio.run(scheduler_loop(loop=args.loop, every=args.every, symbol=SYMBOL, compact=args.compact))
