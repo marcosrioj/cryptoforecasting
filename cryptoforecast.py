@@ -74,7 +74,7 @@ def term_width(default=80):
 def divider(char="─"):
     return char * max(40, min(120, term_width()))
 
-# ---------- LOG/CSV PATHS ----------
+# ---------- LOG PATH ----------
 def _script_base_name() -> str:
     return Path(__file__).resolve().with_suffix("").name
 
@@ -83,20 +83,10 @@ def _log_path(now_utc: datetime, symbol: str) -> Path:
     fname = now_utc.strftime("%Y-%m-%d_%H-%M-%S") + ".log"
     return base / fname
 
-def _csv_path() -> Path:
-    return Path(_script_base_name()) / "summary.csv"
-
 def _write_summary_log(text: str, now_utc: datetime, symbol: str) -> None:
     path = _log_path(now_utc, symbol)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-
-def _append_csv(rows: List[dict]) -> None:
-    csv_path = _csv_path()
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(rows)
-    header = not csv_path.exists()
-    df.to_csv(csv_path, mode="a", index=False, header=header, encoding="utf-8")
 
 # --------- Time alignment ----------
 def _week_start_utc(dt_utc: datetime) -> datetime:
@@ -121,6 +111,19 @@ def trim_to_last_closed(df: pd.DataFrame, code: str) -> pd.DataFrame:
     cutoff = pd.to_datetime(last_closed_open_time(code)).tz_convert(None)
     return df[df["ts"] <= cutoff].sort_values("ts").reset_index(drop=True)
 
+# --------- helpers for formatting like raw last ---------
+def decimals_in_str(num_str: str) -> int:
+    if "." not in num_str:
+        return 0
+    return len(num_str.split(".")[1])
+
+def format_like(last_str: str, value: float) -> str:
+    d = decimals_in_str(last_str)
+    if d == 0:
+        # If last had no decimals, show integer
+        return str(int(round(value)))
+    return f"{value:.{d}f}"
+
 # --------- Fetch ----------
 async def fetch_kline(session, interval_code: str, limit: int, symbol: str) -> pd.DataFrame:
     url = "https://api.bybit.com/v5/market/kline"
@@ -128,12 +131,17 @@ async def fetch_kline(session, interval_code: str, limit: int, symbol: str) -> p
     async with session.get(url, params=params, timeout=30) as resp:
         data = await resp.json()
         rows = data.get("result", {}).get("list", [])
-        if not rows: return pd.DataFrame()
+        if not rows:
+            return pd.DataFrame()
+        # Build as strings first, keep original 'close' text
         df = pd.DataFrame(rows, columns=["start","open","high","low","close","volume","turnover"])
+        df["close_str"] = df["close"].astype(str)
+        # Now convert numerics
         df["ts"] = pd.to_datetime(df["start"].astype("int64"), unit="ms", utc=True).dt.tz_convert(None)
         for c in ["open","high","low","close","volume","turnover"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        return df.dropna()[["ts","open","high","low","close","volume","turnover"]].sort_values("ts").reset_index(drop=True)
+        df = df.dropna().sort_values("ts").reset_index(drop=True)
+        return df[["ts","open","high","low","close","volume","turnover","close_str"]]
 
 async def fetch_all_tf(symbol: str) -> Dict[str, pd.DataFrame]:
     async with aiohttp.ClientSession() as s:
@@ -142,7 +150,7 @@ async def fetch_all_tf(symbol: str) -> Dict[str, pd.DataFrame]:
     return {tf: r for (tf,_), r in zip(TIMEFRAMES.items(), res)}
 
 # --------- Features & models ----------
-def make_features(df):
+def make_features(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     d["ret_1"] = d["close"].pct_change()
     for w in [3,6,12,24,60]:
@@ -328,11 +336,13 @@ def print_overall(signals_ordered: List[str], results: Dict[str,dict], vote: int
 def print_timeframe_block(tf: str, r: dict):
     head = f"{_icon(tf)}[{tf}]  - Signal: {_color_signal_word(r['sig'])}"
     print(head)
+    # Use original last_str and format pred with the same decimals
+    last_str = r["last_str"]
+    pred_fmt = format_like(last_str, r["pred"])
     dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
-    # >>> Unformatted raw values for last and pred <<<
     row1 = (
-        f"last={r['last']}  "
-        f"pred={r['pred']}  "
+        f"last={last_str}  "
+        f"pred={pred_fmt}  "
         f"Δ%={color_num_delta(dpct_val):>7}  "
         f"MAPE={color_num_mape(r['cv']*100):>7}  "
         f"dir_acc={color_num_diracc(r['acc']):>7}  "
@@ -403,6 +413,7 @@ async def run_once(symbol: str, *, compact=False):
         if feat.empty: continue
 
         last = float(data["close"].iloc[-1])
+        last_str = str(data["close_str"].iloc[-1])
         pred, cv, acc, ens_std, preds = fit_predict_ensemble(feat, last)
         rsi_v, macd_hist = float(feat["rsi_14"].iloc[-1]), float(feat["macd_diff"].iloc[-1])
 
@@ -410,7 +421,7 @@ async def run_once(symbol: str, *, compact=False):
         dpcts_tmp[tf] = dpct
         base_sig = decide_signal(dpct)
         sig = overlay_with_rsi_macd(base_sig, rsi_v, macd_hist, last)
-        conf = max(5.0, min(95.0, (1.0 - cv)*100.0 - (ens_std/last)*100.0))
+        conf = max(5.0, min(95.0, (1.0 - cv)*100.0) - (ens_std/last)*100.0)
 
         ema_s, ema_l = float(feat["ema_3"].iloc[-1]), float(feat["ema_24"].iloc[-1])
         bb_l, bb_m, bb_h = float(feat["bb_l"].iloc[-1]), float(feat["bb_m"].iloc[-1]), float(feat["bb_h"].iloc[-1])
@@ -442,7 +453,7 @@ async def run_once(symbol: str, *, compact=False):
         overlay_applied = "Yes" if sig != base_sig else "No"
 
         results[tf] = {
-            "last": last, "pred": pred, "dpct": dpct,
+            "last": last, "last_str": last_str, "pred": pred, "dpct": dpct,
             "cv": cv, "acc": acc*100.0, "conf": conf,
             "rsi": rsi_v, "macd": macd_hist, "sig": sig,
             "nums": {
@@ -475,7 +486,7 @@ async def run_once(symbol: str, *, compact=False):
             r = results.get(tf)
             if r: print_timeframe_block(tf, r)
 
-    # ---------- SUMMARY LOG & CSV (plain text) ----------
+    # ---------- SUMMARY LOG (plain text) ----------
     summary_lines = [
         "SUMMARY",
         f"symbol: {SYMBOL}  category: {CATEGORY}  generated_at: {now_str}",
@@ -484,35 +495,23 @@ async def run_once(symbol: str, *, compact=False):
         f"execution_time_seconds: {duration:.2f}",
         ""
     ]
-    csv_rows: List[dict] = []
 
     for tf in ORDERED_TF:
         r = results.get(tf)
         if not r:
             continue
         dpct_val = (r["pred"] - r["last"]) / r["last"] * 100
-        # >>> Unformatted raw values for last and pred in logs <<<
+        pred_fmt = format_like(r["last_str"], r["pred"])
         summary_lines.append(
-            f"[{tf}] last={r['last']}  pred={r['pred']}  Δ%={dpct_val:.2f}  "
+            f"[{tf}] last={r['last_str']}  pred={pred_fmt}  Δ%={dpct_val:.2f}  "
             f"MAPE={(r['cv']*100):.2f}%  dir_acc={(r['acc']):.2f}%  conf={r['conf']:.2f}%  "
             f"signal={r['sig']}"
         )
-        # >>> Unformatted raw numbers for last & pred in CSV <<<
-        csv_rows.append({
-            "generated_at_utc": now_str, "exec_time_s": round(duration, 2),
-            "timeframe": tf, "symbol": SYMBOL,
-            "last": r["last"], "pred": r["pred"],
-            "delta_pct": round(dpct_val, 2),
-            "mape_pct": round(r['cv']*100.0, 2), "dir_acc_pct": round(r['acc'], 2),
-            "conf_pct": round(r['conf'], 2), "signal": r["sig"],
-            "vote": vote, "overall_decision": overall
-        })
 
     summary_lines.append("")
     summary_lines.append(f"overall_decision: {overall}  (vote={vote})")
 
     _write_summary_log("\n".join(summary_lines) + "\n", now_utc, SYMBOL)
-    _append_csv(csv_rows)
 
 # --------- Scheduler / CLI ---------
 async def scheduler_loop(loop: bool, every: int, symbol: str, *, compact=False):
