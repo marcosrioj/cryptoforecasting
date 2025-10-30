@@ -24,8 +24,12 @@ from email.message import EmailMessage
 # OAuth2 support removed for simpler SMTP-only operation
 import argparse
 import traceback
+import warnings
 
 import cryptoforecast as cf
+
+# Suppress runtime/library warnings in console
+warnings.filterwarnings("ignore")
 
 
 DEFAULT_WATCHLIST = [
@@ -41,6 +45,7 @@ def get_env(name: str, default=None):
 def send_email(subject: str, body: str, recipient: str, smtp_user: str, smtp_pass: str,
                smtp_host: str = "smtp.gmail.com", smtp_port: int = 465):
     if not smtp_user or not smtp_pass:
+        # Minimal reporting; avoid verbose traces
         print("[watchlist] SMTP credentials not configured. Set EMAIL_USER and EMAIL_PASS.")
         return False
     msg = EmailMessage()
@@ -53,16 +58,15 @@ def send_email(subject: str, body: str, recipient: str, smtp_user: str, smtp_pas
         with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as s:
             s.login(smtp_user, smtp_pass)
             s.send_message(msg)
-        print(f"[watchlist] Email sent to {recipient}: {subject}")
+        # Keep output minimal
+        print(f"[watchlist] Email sent to {recipient}")
         return True
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"[watchlist] SMTP authentication failed: {e}")
-        print("[watchlist] Common fixes: check EMAIL_USER/EMAIL_PASS, use Gmail App Password if 2FA is enabled.")
-        traceback.print_exc()
+    except smtplib.SMTPAuthenticationError:
+        # Compact auth failure message
+        print("[watchlist] SMTP authentication failed: check EMAIL_USER/EMAIL_PASS or use an App Password")
         return False
     except Exception as e:
         print(f"[watchlist] Failed to send email: {e}")
-        traceback.print_exc()
         return False
 
 
@@ -85,42 +89,57 @@ def parse_overall_from_summary(summary_lines):
     return None
 
 
-async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False):
-    triggered = []
-    for s in symbols:
-        print(f"[watchlist] Checking {s} at {datetime.now(timezone.utc).isoformat()}")
-        try:
-            # run core forecast for the symbol (shared multi-TF data)
-            results, dpcts_tmp, duration, now_utc, summary_lines = await cf._core_forecast(s)
-            overall = parse_overall_from_summary(summary_lines)
-            if overall == "STRONGBUY":
-                # build email body with the summary lines and a small header
-                title = f"CRYPTOFORECAST ALERT: STRONGBUY {s} @ {now_utc.isoformat()}"
-                body = title + "\n\n" + "\n".join(summary_lines)
-                # include some JSON-like detail for quick programmatic parsing
-                try:
-                    # Try to also include per-tf concise lines
-                    tf_lines = []
-                    for tf in cf.ORDERED_TF:
-                        r = results.get(tf)
-                        if not r: continue
-                        tf_lines.append(f"[{tf}] last={r['last_str']} pred={r['pred']:.6f} sig={r['sig']}")
-                    if tf_lines:
-                        body += "\n\nPer-timeframe quick: \n" + "\n".join(tf_lines)
-                except Exception:
-                    pass
+async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False, concurrency: int = 5):
+    """Run forecasts for `symbols` in parallel (bounded by `concurrency`).
 
-                send_email(title, body, email_to, smtp_user, smtp_pass)
-                triggered.append((s, summary_lines))
+    Returns a list of triggered alerts as (symbol, summary_lines).
+    """
+    triggered = []
+    sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def worker(s):
+        try:
+            async with sem:
+                results, dpcts_tmp, duration, now_utc, summary_lines = await cf._core_forecast(s)
         except Exception as e:
+            # Compact error reporting only
             print(f"[watchlist] Error checking {s}: {e}")
-            traceback.print_exc()
+            return None
+
+        overall = parse_overall_from_summary(summary_lines)
+        if overall == "STRONGBUY":
+            title = f"CRYPTOFORECAST ALERT: STRONGBUY {s} @ {now_utc.isoformat()}"
+            body = title + "\n\n" + "\n".join(summary_lines)
+            try:
+                tf_lines = []
+                for tf in cf.ORDERED_TF:
+                    r = results.get(tf)
+                    if not r:
+                        continue
+                    tf_lines.append(f"[{tf}] last={r['last_str']} pred={r['pred']:.6f} sig={r['sig']}")
+                if tf_lines:
+                    body += "\n\nPer-timeframe quick: \n" + "\n".join(tf_lines)
+            except Exception:
+                pass
+
+            ok = send_email(title, body, email_to, smtp_user, smtp_pass)
+            if ok:
+                return (s, summary_lines)
+            else:
+                print(f"[watchlist] Failed to send email for {s}")
+        return None
+
+    tasks = [asyncio.create_task(worker(s)) for s in symbols]
+    results_list = await asyncio.gather(*tasks)
+    triggered = [r for r in results_list if r]
+    if triggered:
+        print(f"[watchlist] Triggered alerts: {', '.join([t[0] for t in triggered])}")
     return triggered
 
 
-async def hourly_loop(symbols, smtp_user, smtp_pass, email_to, run_once=False, compact=False):
+async def hourly_loop(symbols, smtp_user, smtp_pass, email_to, run_once=False, compact=False, concurrency: int = 5):
     # Run immediately, then wait for next hour boundary
-    await check_once(symbols, smtp_user, smtp_pass, email_to, compact=compact)
+    await check_once(symbols, smtp_user, smtp_pass, email_to, compact=compact, concurrency=concurrency)
     if run_once:
         return
     while True:
@@ -131,7 +150,7 @@ async def hourly_loop(symbols, smtp_user, smtp_pass, email_to, run_once=False, c
         wait = max(1, next_hour - now)
         print(f"[watchlist] Sleeping {wait:.0f}s until next hourly run")
         await asyncio.sleep(wait)
-        await check_once(symbols, smtp_user, smtp_pass, email_to, compact=compact)
+        await check_once(symbols, smtp_user, smtp_pass, email_to, compact=compact, concurrency=concurrency)
 
 
 def build_watchlist_from_env():
@@ -148,6 +167,7 @@ def main():
     p.add_argument("--test-email", action="store_true", help="Send a test email using configured SMTP creds and exit")
     p.add_argument("--email-to", default=None, help="Recipient email (overrides EMAIL_TO env var)")
     p.add_argument("--symbols", default=None, help="Comma-separated list of symbols to monitor (overrides WATCHLIST env var)")
+    p.add_argument("--concurrency", type=int, default=None, help="Number of symbols to check in parallel (default: 5 or WATCHER_CONCURRENCY env)")
     args = p.parse_args()
 
     smtp_user = get_env("EMAIL_USER")
@@ -184,8 +204,10 @@ def main():
             print("[watchlist] Test email failed. Check SMTP/OAuth configuration and logs.")
         return
 
+    # determine concurrency: CLI arg > env var > default 5
+    concurrency = args.concurrency or int(get_env("WATCHER_CONCURRENCY") or 5)
     try:
-        asyncio.run(hourly_loop(symbols, smtp_user, smtp_pass, email_to, run_once=args.once, compact=args.compact))
+        asyncio.run(hourly_loop(symbols, smtp_user, smtp_pass, email_to, run_once=args.once, compact=args.compact, concurrency=concurrency))
     except KeyboardInterrupt:
         print("[watchlist] Stopped by user")
 
