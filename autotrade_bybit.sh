@@ -3,4 +3,5 @@
 source .venv/bin/activate
 
 # Run cryptoforecast.py passing all arguments given to this script
+
 python3 autotrade_bybit.py "$@"

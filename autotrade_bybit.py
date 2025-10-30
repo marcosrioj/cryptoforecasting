@@ -212,14 +212,20 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         return
 
     side = None
+    # Take profit: use 90% of the predicted Δ% (i.e. 10% less than predicted)
+    # Stop loss: 2.5% adverse move from entry
+    SL_FRAC = 0.025
     if sig in ("BUY", "STRONGBUY"):
         side = "Buy"
         tp_price = price * (1.0 + tp_pct / 100.0)
-        sl_price = price * (1.0 - 0.25)
+        # TP uses 90% of avg_dpct (tp_pct already set to avg_dpct*0.9 above)
+        # Stop loss is 2.5% below entry
+        sl_price = price * (1.0 - SL_FRAC)
     elif sig in ("SELL", "STRONGSELL"):
         side = "Sell"
         tp_price = price * (1.0 - tp_pct / 100.0)
-        sl_price = price * (1.0 + 0.25)
+        # Stop loss is 2.5% above entry for shorts
+        sl_price = price * (1.0 + SL_FRAC)
     else:
         print(f"[autotrade] Unhandled signal {sig}; skipping")
         return
@@ -278,7 +284,14 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
 # Scheduler: align to 5-minute boundaries and run forever (or once)
 async def scheduler(symbol: str, dry_run: bool = True, once: bool = False):
     symbol = normalize_symbol(symbol)
-    # Align to next 5-minute boundary
+    # Run immediately once on startup, then align to 5-minute boundaries
+    try:
+        await handle_symbol(symbol, dry_run=dry)
+    except Exception as e:
+        print(f"[autotrade] Error during initial handle_symbol: {e}")
+    if once:
+        return
+
     while True:
         now = time.time()
         # number of seconds until next multiple of 300
@@ -286,11 +299,9 @@ async def scheduler(symbol: str, dry_run: bool = True, once: bool = False):
         print(f"[autotrade] Sleeping {wait}s until next 5-min boundary")
         await asyncio.sleep(wait)
         try:
-            await handle_symbol(symbol, dry_run=dry_run)
+            await handle_symbol(symbol, dry_run=dry)
         except Exception as e:
             print(f"[autotrade] Error during handle_symbol: {e}")
-        if once:
-            break
 
 
 def parse_args():
