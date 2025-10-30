@@ -64,22 +64,20 @@ Run with custom interval (seconds):
 python3 cryptoforecast.py --loop --every 60
 ```
 
-Other flags
  - `--category` : Bybit category (linear, inverse, spot)
  - `--compact`  : compact summary output
  - `--no-color` : disable ANSI colors
  - `--no-icons` : disable emojis/icons
- - `--strategy` : run a named strategy (see Strategies below)
- - `--strategy-category` : run all strategies in a category (Day Trading, Swing Trading, Long-Term)
+ - `--strategy` / `--strategy-category` : removed — the script runs all registered strategies by default
 
 Interactive configuration
 -------------------------
-When you run the script without any CLI arguments (and from a TTY), the script now opens an
-interactive prompt and asks for the main runtime parameters. This is convenient for quick
-exploration or when you prefer not to type flags. Behavior:
+ When you run the script without any CLI arguments (and from a TTY), the script opens an
+ interactive prompt and asks for the main runtime parameters. This is convenient for quick
+ exploration or when you prefer not to type flags. Behavior:
 
-- Prompts for: symbol, loop (yes/no), `--every` (seconds), Bybit category, compact mode, colors/icons,
-  and strategy/strategy-category selection.
+ Prompts for: symbol, loop (yes/no), `--every` (seconds), Bybit category, compact mode, colors/icons.
+ Strategy selection is no longer asked interactively because the script now runs all strategies by default.
 - Each prompt shows valid options (when relevant) and the default value; press Enter to accept the default.
 - The interactive prompt only triggers when stdin is a TTY and no CLI args were provided. Running with
   any flags (or from a non-interactive environment) keeps the previous, non-interactive behavior.
@@ -95,9 +93,7 @@ Bybit category. Options: linear, inverse, spot. (default: linear): spot
 Compact summary mode? [y/N] (default: False):
 Enable ANSI colors? [Y/n] (default: True): y
 Enable icons/emojis? [Y/n] (default: True): n
-Available strategies: FirstOne, Scalping, Breakout, RangeTrading, AI_ML, MultiIndicator, PriceAction, Arbitrage, TrendFollowing, BreakoutMomentumSwing, SupportResistanceSwing, SentimentSwing, IchimokuSwing, HODL, DCA, Staking, Diversified, ValueInvesting
-Strategy name (leave blank to run default FirstOne) (default: None): Scalping
-
+ -- now the script runs according to the choices you entered --
 -- now the script runs according to the choices you entered --
 ```
 
@@ -115,11 +111,11 @@ chmod +x cryptoforecast.sh
 
 Strategies (categories & quick descriptions)
 -------------------------------------------
-The repository now exposes a strategy registry accessible via `--strategy` (run one) or
-`--strategy-category` (run all of a category). Each strategy now receives the shared multi-timeframe
-data and prints a consistent summary template (header, underlying multi-timeframe details, and the
-strategy decision). Some strategies implement full heuristics using the available kline+indicator
-data while a few remain placeholders requiring external data (noted below).
+The repository registers a set of strategies grouped by category. The script now runs all
+registered strategies by default in a single run: it computes the shared multi-timeframe data
+(1w, 1d, 4h, 1h, 5m) once, prints the main header and timeframe blocks, and then appends each
+strategy's summary block below the timeframes. Some strategies implement heuristics with the
+available kline+indicator data while a few remain placeholders requiring external data (noted below).
 
 Day Trading
  - Scalping — many quick trades on 1–5m TFs; uses tight stops and fast execution (stub).
@@ -169,25 +165,29 @@ Long-term helpers
  - DCA: recommends DCA buys when price is significantly below the long-term EMA.
  - Staking/Diversified/ValueInvesting/Arbitrage: placeholders — require external data (staking APYs, portfolio holdings, fundamentals, or cross-exchange orderbooks).
 
-Usage examples (strategies)
---------------------------
-Run the original strategy (renamed `FirstOne`, default):
+Usage examples
+--------------
+Run everything (default behavior — computes core once and runs all strategies):
 
 ```bash
-python3 cryptoforecast.py --strategy FirstOne
+python3 cryptoforecast.py
 ```
 
-Run all Day Trading strategies (all stubs):
+Run continuously (aligned to 5m by default):
 
 ```bash
-python3 cryptoforecast.py --strategy-category "Day Trading"
+python3 cryptoforecast.py --loop
 ```
 
-Run a single named strategy in loop mode (example):
+Run in compact mode:
 
 ```bash
-python3 cryptoforecast.py --loop --strategy Scalping --every 60
+python3 cryptoforecast.py --compact
 ```
+
+If you want to run only a subset of strategies or reintroduce CLI selection, it's possible to
+add a convenience flag (e.g. `--list-strategies` or `--strategy`) — tell me if you'd like that
+added back in and I'll implement it.
 
 Notes & next steps
 ------------------

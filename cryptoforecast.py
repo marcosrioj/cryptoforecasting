@@ -333,7 +333,7 @@ def print_overall(signals_ordered: List[str], results: Dict[str,dict], vote: int
     print(f"Decision   : {_color_signal_word(overall)}")
     print(divider())
 
-def print_timeframe_block(tf: str, r: dict):
+def print_timeframe_block(tf: str, r: dict, overall: str = None):
     head = f"{_icon(tf)}[{tf}]  - Signal: {_color_signal_word(r['sig'])}"
     print(head)
     # Use original last_str and format pred with the same decimals
@@ -376,6 +376,9 @@ def print_timeframe_block(tf: str, r: dict):
     if COLOR_ENABLED:
         overlay_txt = f"{YELL}{overlay_txt}{RESET}"
     print(f"AI         : {', '.join(ai_tokens)}  agree={agree_colored}  overlay={overlay_txt}")
+    # After each timeframe block, show the underlying (this TF) and the overall decision
+    if overall is not None:
+        print(f"Summary    : UNDERLYING={_color_signal_word(r['sig'])}  OVERALL={_color_signal_word(overall)}")
     print(divider())
 
 def print_compact(symbol, overall, vote, order_tfs, results, dpcts):
@@ -396,19 +399,43 @@ def print_compact(symbol, overall, vote, order_tfs, results, dpcts):
     print(divider())
 
 
+def print_core_summary(core, symbol: str, *, compact: bool = False):
+    """Print the main header, underlying overall and timeframe blocks once for the shared core.
+
+    This is printed once and then each strategy summary is appended below.
+    """
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    thresholds = {"buy_bps": BUY_BPS, "sell_bps": SELL_BPS}
+    # header
+    print_header(symbol, CATEGORY, now_str, thresholds, WEIGHTS, duration)
+
+    # compute vote/overall from results
+    vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
+               for tf,r in results.items())
+    overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
+
+    if compact:
+        print_compact(symbol, overall, vote, ORDERED_TF, results, dpcts_tmp)
+    else:
+        print_overall(ORDERED_TF, results, vote, overall)
+        for tf in ORDERED_TF:
+            r = results.get(tf)
+            if r:
+                print_timeframe_block(tf, r)
+
+
 def render_strategy_summary(symbol: str, strategy_name: str, core, strategy_decision: dict, compact: bool = False):
-    """Render a consistent summary for any strategy using the shared core results.
+    """Render a compact, consistent summary block for a single strategy using the shared core.
+
+    This function does NOT clear the console or reprint the main header — it is intended to
+    be called after `print_core_summary` so all strategy blocks appear under the timeframes section.
 
     strategy_decision: dict with keys 'sig' (BUY/SELL/FLAT) and optional 'reason' and 'meta'
     """
     results, dpcts_tmp, duration, now_utc, summary_lines = core
-    now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-    clear_console()
-    thresholds = {"buy_bps": BUY_BPS, "sell_bps": SELL_BPS}
-    # show strategy name in the header category field
-    print_header(symbol, f"{CATEGORY} | {strategy_name}", now_str, thresholds, WEIGHTS, duration)
 
-    # compute underlying overall (from core results)
+    # compute underlying overall (from core results) for context
     vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
                for tf,r in results.items())
     underlying_overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
@@ -421,27 +448,28 @@ def render_strategy_summary(symbol: str, strategy_name: str, core, strategy_deci
     else:
         reason_txt = str(reason)
 
-    # print underlying overall and then the strategy decision
-    print(("🧭 " if ICONS_ENABLED else "") + f"[UNDERLYING OVERALL] {underlying_overall} (vote={vote})")
-    print(divider())
+    # print a strategy block appended under the core summary
+    print(divider("-"))
     print(f"Strategy   : {strategy_name}")
+    print(f"Underlying : {underlying_overall} (vote={vote})")
     print(f"Decision   : {_color_signal_word(strat_sig)}  Reason: {reason_txt}")
-    print(divider())
-
+    # optional compact per-strategy detail: show per-tf dpct quick view
     if compact:
-        print_compact(symbol, underlying_overall, vote, ORDERED_TF, results, dpcts_tmp)
-    else:
-        print_overall(ORDERED_TF, results, vote, underlying_overall)
+        dpct_parts = []
         for tf in ORDERED_TF:
-            r = results.get(tf)
-            if r:
-                print_timeframe_block(tf, r)
+            if tf in dpcts_tmp:
+                dpct_parts.append(f"{tf}:{dpcts_tmp[tf]:.2f}%")
+        if dpct_parts:
+            print("Δ%         : " + " | ".join(dpct_parts))
+    print(divider())
 
     # also write a summary log for the strategy decision
     log_lines = [f"STRATEGY: {strategy_name}", f"Decision: {strat_sig}", f"Reason: {reason_txt}", ""]
     log_lines.extend(summary_lines)
     _write_summary_log("\n".join(log_lines) + "\n", now_utc, symbol)
     return {"name": strategy_name, "signal": strat_sig, "reason": reason_txt}
+
+
 
 # --------- Core run / Strategies ---------
 async def _core_forecast(symbol: str):
@@ -555,32 +583,25 @@ async def _core_forecast(symbol: str):
     return results, dpcts_tmp, duration, now_utc, summary_lines
 
 
-async def FirstOne(symbol: str, *, compact=False):
+async def FirstOne(symbol: str, *, core=None, compact=False):
     """The original strategy (renamed to FirstOne).
 
-    This preserves the behavior of the original script. It runs the multi-timeframe
-    ensemble forecast and prints the human-friendly summary.
+    Accepts an optional `core` result tuple so it can reuse the shared multi-timeframe
+    computation. When `core` is provided FirstOne will render as a strategy block
+    (so the core header/timeframes can be printed once and then all strategies appended).
     """
-    results, dpcts_tmp, duration, now_utc, summary_lines = await _core_forecast(symbol)
-    now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-    clear_console()
-    thresholds = {"buy_bps": BUY_BPS, "sell_bps": SELL_BPS}
-    print_header(symbol, CATEGORY, now_str, thresholds, WEIGHTS, duration)
+    if core is None:
+        results, dpcts_tmp, duration, now_utc, summary_lines = await _core_forecast(symbol)
+    else:
+        results, dpcts_tmp, duration, now_utc, summary_lines = core
 
     # compute vote/overall from results
     vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
                for tf,r in results.items())
     overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
 
-    if compact:
-        print_compact(symbol, overall, vote, ORDERED_TF, results, dpcts_tmp)
-    else:
-        print_overall(ORDERED_TF, results, vote, overall)
-        for tf in ORDERED_TF:
-            r = results.get(tf)
-            if r: print_timeframe_block(tf, r)
-
-    return {"name": "FirstOne", "results": results, "summary_lines": summary_lines}
+    # Render FirstOne as a strategy summary to appear after the timeframes
+    return render_strategy_summary(symbol, "FirstOne", (results, dpcts_tmp, duration, now_utc, summary_lines), {"sig": overall, "reason": ["Original ensemble decision"]}, compact=compact)
 
 
 # Strategy registry: name -> dict(category, fn, description)
@@ -829,36 +850,23 @@ _register("Diversified", "Long-Term", _diversified, "Diversified portfolio stub"
 _register("ValueInvesting", "Long-Term", _value_investing, "Value investing stub")
 
 
-async def run_once(symbol: str, *, strategy_name: str = None, strategy_category: str = None, compact=False):
-    """Run one or more strategies for the symbol.
+async def run_once(symbol: str, *, compact=False):
+    """Run all registered strategies once for the symbol.
 
-    If strategy_name provided, runs that strategy. If strategy_category provided, runs all strategies
-    that belong to that category. If neither provided, runs FirstOne (original behavior).
+    The shared multi-timeframe core is computed once and passed to each strategy
+    so they all operate on identical data. The main header/timeframes are printed
+    once and then each strategy appends its summary block below.
     """
-    # determine which strategies to run
-    to_run = []
-    if strategy_name:
-        s = STRATEGIES.get(strategy_name)
-        if not s:
-            print(f"Unknown strategy '{strategy_name}'. Available: {list(STRATEGIES.keys())}")
-            return
-        to_run.append((strategy_name, s["fn"]))
-    elif strategy_category:
-        for name, meta in STRATEGIES.items():
-            if meta["category"].lower() == strategy_category.lower():
-                to_run.append((name, meta["fn"]))
-        if not to_run:
-            print(f"No strategies found for category '{strategy_category}'. Available categories: "
-                  f"{sorted(set(m["category"] for m in STRATEGIES.values()))}")
-            return
-    else:
-        to_run.append(("FirstOne", STRATEGIES["FirstOne"]["fn"]))
-
     # run core forecast once and share results to all strategies
     core = await _core_forecast(symbol)
-    for name, fn in to_run:
-        print(divider())
-        print(f"Running strategy: {name} (category={STRATEGIES[name]['category']})")
+
+    # Clear and print the main core summary (timeframes) once
+    clear_console()
+    print_core_summary(core, symbol, compact=compact)
+
+    # Run each registered strategy and append its summary block below the timeframes
+    for name, meta in STRATEGIES.items():
+        fn = meta.get("fn")
         try:
             await fn(symbol, core=core, compact=compact)
         except TypeError:
@@ -866,8 +874,8 @@ async def run_once(symbol: str, *, strategy_name: str = None, strategy_category:
             await fn(symbol)
 
 # --------- Scheduler / CLI ---------
-async def scheduler_loop(loop: bool, every: int, symbol: str, *, strategy_name: str = None, strategy_category: str = None, compact=False):
-    await run_once(symbol, strategy_name=strategy_name, strategy_category=strategy_category, compact=compact)  # immediate first run
+async def scheduler_loop(loop: bool, every: int, symbol: str, *, compact=False):
+    await run_once(symbol, compact=compact)  # immediate first run
     if not loop:
         return
     while True:
@@ -877,7 +885,7 @@ async def scheduler_loop(loop: bool, every: int, symbol: str, *, strategy_name: 
         else:
             wait = every
         await asyncio.sleep(wait)
-        await run_once(symbol, strategy_name=strategy_name, strategy_category=strategy_category, compact=compact)
+        await run_once(symbol, compact=compact)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Bybit Multi-timeframe Forecast")
@@ -886,8 +894,7 @@ def parse_args():
     p.add_argument("--every", type=int, default=300, help="Seconds between runs when --loop (default: 300)")
     p.add_argument("--category", default=CATEGORY, help="Bybit category: linear, inverse, spot (default: linear)")
     p.add_argument("--compact", action="store_true", help="Compact summary mode")
-    p.add_argument("--strategy", default=None, help="Strategy name to run (e.g., FirstOne, Scalping).")
-    p.add_argument("--strategy-category", default=None, help="Strategy category to run (Day Trading, Swing Trading, Long-Term).")
+    # Strategy selection removed: script runs all registered strategies by default
     p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     p.add_argument("--no-icons", action="store_true", help="Disable icons/emojis")
     return p.parse_args()
@@ -958,20 +965,7 @@ def interactive_fill_args(args: argparse.Namespace) -> argparse.Namespace:
     args.no_icons = not _ask_bool("Enable icons/emojis?", default=not args.no_icons)
 
     # Strategy selection
-    try:
-        available = sorted(STRATEGIES.keys())
-    except Exception:
-        available = []
-    if available:
-        print(f"Available strategies: {', '.join(available)}")
-        s = _ask("Strategy name (leave blank to run default FirstOne)", default=args.strategy)
-        args.strategy = s if s else None
-        if not args.strategy:
-            # ask category of strategies
-            cats = sorted(set(meta["category"] for meta in STRATEGIES.values()))
-            print(f"Available strategy categories: {', '.join(cats)}")
-            sc = _ask("Strategy category to run (leave blank for none)", default=args.strategy_category, options=cats)
-            args.strategy_category = sc if sc else None
+    # Strategy selection removed in interactive mode — the script runs all strategies by default.
 
     return args
 
@@ -982,6 +976,4 @@ if __name__ == "__main__":
     CATEGORY = args.category
     _set_color(not args.no_color)
     ICONS_ENABLED = not args.no_icons
-    asyncio.run(scheduler_loop(loop=args.loop, every=args.every, symbol=SYMBOL,
-                              strategy_name=args.strategy, strategy_category=args.strategy_category,
-                              compact=args.compact))
+    asyncio.run(scheduler_loop(loop=args.loop, every=args.every, symbol=SYMBOL, compact=args.compact))
