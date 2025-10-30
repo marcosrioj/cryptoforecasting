@@ -295,8 +295,8 @@ async def scheduler(symbol: str, dry_run: bool = True, once: bool = False):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Autotrade Bybit futures using cryptoforecast.FirstOne")
-    p.add_argument("--symbol", required=True, help="Symbol to trade (e.g., BTCUSDT or BTC). Short tokens get USDT appended")
-    p.add_argument("--dry-run", action="store_true", default=True, help="Do not send signed requests; only simulate (default)")
+    p.add_argument("--symbol", default="", help="Symbol to trade (e.g., BTCUSDT or BTC). Short tokens get USDT appended")
+    p.add_argument("--live", action="store_true", default=False, help="Run in live mode (send signed API calls). Default: dry-run")
     p.add_argument("--once", action="store_true", help="Run one cycle then exit")
     return p.parse_args()
 
@@ -307,10 +307,12 @@ if __name__ == "__main__":
     if sys.stdin.isatty():
         print("Interactive configuration for autotrade_bybit.py — press Enter to accept defaults")
         # Symbol
-        symbol_input = _ask("Symbol to trade (e.g., BTCUSDT)", default=args.symbol)
+        symbol_input = _ask("Symbol to trade (e.g., BTCUSDT)", default=args.symbol or "")
         args.symbol = symbol_input
-        # Dry-run
-        args.dry_run = _ask_bool("Dry-run (no signed API calls)?", default=args.dry_run)
+        # Dry-run (interactive): default is True unless --live flag used
+        default_dry = not bool(args.live)
+        dry_choice = _ask_bool("Dry-run (no signed API calls)?", default=default_dry)
+        args.dry_run = dry_choice
         # Once
         args.once = _ask_bool("Run once and exit?", default=args.once)
         # TRADE_USDT
@@ -344,9 +346,9 @@ if __name__ == "__main__":
         CATEGORY = _ask("Bybit category (linear/inverse/spot)", default=CATEGORY)
 
     sym = normalize_symbol(args.symbol)
-    dry = bool(args.dry_run)
+    dry = bool(getattr(args, "dry_run", True))
     if dry:
-        print("WARNING: Running in dry-run mode (no signed API calls will be made). Remove --dry-run to enable live trading.")
+        print("WARNING: Running in dry-run mode (no signed API calls will be made). Use --live or set live during the prompt to enable live trading.")
     try:
         # Update API_HOST based on (possibly) updated BYBIT_TESTNET
         API_HOST = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"

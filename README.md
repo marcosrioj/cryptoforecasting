@@ -410,6 +410,14 @@ python3 autotrade_bybit.py --symbol BTCUSDT --dry-run --once
 Live mode (only after extensive testing): remove `--dry-run` to enable real orders. The
 script aligns to 5-minute boundaries automatically; to run once and exit use `--once`.
 
+Interactive prompts
+-------------------
+When you launch `autotrade_bybit.py` from a terminal (TTY), the script will prompt you for
+each configurable parameter one-by-one: symbol, dry-run vs live choice, run-once, trade
+notional (`TRADE_USDT`), leverage, testnet toggle, API key, API secret (entered securely),
+and Bybit category. Press Enter to accept the shown default for each prompt. This is the
+recommended workflow for initial configuration and testing.
+
 Important safety notes
 
 - TP/SL semantics vary by Bybit account and market type. The script attempts to attach
