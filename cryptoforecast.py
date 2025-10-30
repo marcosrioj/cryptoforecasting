@@ -41,6 +41,11 @@ def _set_color(enabled: bool):
     global COLOR_ENABLED, GREEN, RED, YELL, CYAN, WHITE, RESET
     COLOR_ENABLED = enabled
     if enabled:
+        # Use two shades: STRONG (darker) and normal (brighter)
+        # STRONG colors (slightly darker): plain Fore color
+        STRONG_GREEN = Fore.GREEN
+        STRONG_RED = Fore.RED
+        # Normal BUY/SELL use brighter style
         GREEN = Fore.GREEN + Style.BRIGHT
         RED   = Fore.RED   + Style.BRIGHT
         YELL  = Fore.YELLOW+ Style.BRIGHT
@@ -49,8 +54,15 @@ def _set_color(enabled: bool):
         RESET = Style.RESET_ALL
     else:
         GREEN = RED = YELL = CYAN = WHITE = RESET = ""
+        STRONG_GREEN = STRONG_RED = ""
+    # export strong colors to module scope
+    globals().setdefault("STRONG_GREEN", STRONG_GREEN)
+    globals().setdefault("STRONG_RED", STRONG_RED)
 
 _set_color(True)
+# Ensure STRONG color names exist at module import time for static analysis
+STRONG_GREEN = globals().get("STRONG_GREEN", "")
+STRONG_RED = globals().get("STRONG_RED", "")
 
 # ---- icon setup ----
 ICONS_ENABLED = True
@@ -211,92 +223,215 @@ def fit_predict_ensemble(df_feat, last_close):
     return pred_ens, cv_mape, dir_acc, ens_std, preds_dict
 
 def decide_signal(dpct):
+    """Return one of: STRONGBUY, BUY, FLAT, SELL, STRONGSELL based on dpct (fractional).
+
+    Uses default BUY_BPS/SELL_BPS as base thresholds and a multiple for strong signals.
+    """
     bps = dpct * 100
-    if bps >= BUY_BPS: return "BUY"
-    if bps <= SELL_BPS: return "SELL"
+    # Strong thresholds: 3x base threshold (reasonable default). If you want different tuning,
+    # adjust STRONG_MULTIPLIER.
+    STRONG_MULTIPLIER = 3
+    strong_buy = BUY_BPS * STRONG_MULTIPLIER
+    strong_sell = SELL_BPS * STRONG_MULTIPLIER
+    if bps >= strong_buy:
+        return "STRONGBUY"
+    if bps >= BUY_BPS:
+        return "BUY"
+    if bps <= strong_sell:
+        return "STRONGSELL"
+    if bps <= SELL_BPS:
+        return "SELL"
     return "FLAT"
 
 def overlay_with_rsi_macd(sig, rsi, macd_diff, last_price):
     if 45 <= rsi <= 55 and abs(macd_diff)/max(last_price,1e-9) < 5e-4: return "FLAT"
     return sig
 
+
+# Map signal label to numeric multiplier for voting
+def signal_to_multiplier(sig: str) -> int:
+    return {
+        "STRONGBUY": 2,
+        "BUY": 1,
+        "FLAT": 0,
+        "SELL": -1,
+        "STRONGSELL": -2,
+    }.get(sig, 0)
+
 # ---------- color helpers ----------
 def bias_color(bias: str) -> str:
     if not COLOR_ENABLED: return ""
-    return GREEN if bias == "BUY" else RED if bias == "SELL" else YELL
+    # Map five-level bias to colors
+    if bias == "STRONGBUY":
+        return STRONG_GREEN + Style.NORMAL if 'STRONG_GREEN' in globals() else GREEN
+    if bias == "BUY":
+        return GREEN
+    if bias == "FLAT":
+        return YELL
+    if bias == "SELL":
+        return RED
+    if bias == "STRONGSELL":
+        return STRONG_RED + Style.NORMAL if 'STRONG_RED' in globals() else RED
+    return ""
 
 def paint_val(val_str: str, bias: str) -> str:
     if not COLOR_ENABLED: return val_str
     return f"{bias_color(bias)}{val_str}{RESET}"
 
 def color_num_delta(dpct: float) -> str:
+    # dpct is percent (e.g., 1.23 => 1.23%). Use decide_signal to pick strength.
     sig = decide_signal(dpct)
     return paint_val(f"{dpct:.2f}", sig)
 
 def color_num_mape(mape_pct: float) -> str:
-    if mape_pct < 5: bias="BUY"
-    elif mape_pct <= 15: bias="FLAT"
-    else: bias="SELL"
+    # Lower MAPE -> stronger confidence
+    if mape_pct < 3:
+        bias = "STRONGBUY"
+    elif mape_pct < 7:
+        bias = "BUY"
+    elif mape_pct <= 15:
+        bias = "FLAT"
+    elif mape_pct <= 30:
+        bias = "SELL"
+    else:
+        bias = "STRONGSELL"
     return paint_val(f"{mape_pct:.2f}%", bias)
 
 def color_num_diracc(dir_acc_pct: float) -> str:
-    if dir_acc_pct >= 60: bias="BUY"
-    elif dir_acc_pct >= 50: bias="FLAT"
-    else: bias="SELL"
+    if dir_acc_pct >= 75:
+        bias = "STRONGBUY"
+    elif dir_acc_pct >= 60:
+        bias = "BUY"
+    elif dir_acc_pct >= 50:
+        bias = "FLAT"
+    elif dir_acc_pct >= 35:
+        bias = "SELL"
+    else:
+        bias = "STRONGSELL"
     return paint_val(f"{dir_acc_pct:.2f}%", bias)
 
 def color_num_rsi(rsi: float) -> str:
-    if rsi < 30: bias="BUY"
-    elif rsi > 70: bias="SELL"
-    else: bias="FLAT"
+    if rsi <= 20:
+        bias = "STRONGBUY"
+    elif rsi < 30:
+        bias = "BUY"
+    elif rsi > 80:
+        bias = "STRONGSELL"
+    elif rsi > 70:
+        bias = "SELL"
+    else:
+        bias = "FLAT"
     return paint_val(f"{rsi:.2f}", bias)
 
 def color_num_macd(macd_hist: float, last_price: float) -> str:
-    near = abs(macd_hist) / max(last_price,1e-9) < 5e-4
-    if near: bias="FLAT"
-    elif macd_hist > 0: bias="BUY"
-    else: bias="SELL"
+    rel = abs(macd_hist) / max(last_price,1e-9)
+    # near-zero -> FLAT; large relative MACD -> STRONG
+    if rel < 5e-4:
+        bias = "FLAT"
+    elif macd_hist > 0 and rel >= 5e-3:
+        bias = "STRONGBUY"
+    elif macd_hist > 0:
+        bias = "BUY"
+    elif macd_hist < 0 and rel <= -5e-3:
+        bias = "STRONGSELL"
+    else:
+        bias = "SELL"
     return paint_val(f"{macd_hist:.2f}", bias)
 
 def color_num_conf(conf_pct: float) -> str:
-    if conf_pct >= 85: bias="BUY"
-    elif conf_pct >= 60: bias="FLAT"
-    else: bias="SELL"
+    if conf_pct >= 90:
+        bias = "STRONGBUY"
+    elif conf_pct >= 75:
+        bias = "BUY"
+    elif conf_pct >= 60:
+        bias = "FLAT"
+    elif conf_pct >= 40:
+        bias = "SELL"
+    else:
+        bias = "STRONGSELL"
     return paint_val(f"{conf_pct:.2f}%", bias)
 
 def color_num_ema_diff(pct: float) -> str:
-    bias = "BUY" if pct > 0 else "SELL" if pct < 0 else "FLAT"
-    if abs(pct) < 0.05: bias = "FLAT"
+    if abs(pct) >= 2.0:
+        bias = "STRONGBUY" if pct > 0 else "STRONGSELL"
+    elif abs(pct) >= 0.5:
+        bias = "BUY" if pct > 0 else "SELL"
+    else:
+        bias = "FLAT"
     return paint_val(f"{pct:.2f}%", bias)
 
 def color_num_bb_pos(pct: float) -> str:
-    if pct <= 20: bias="BUY"
-    elif pct >= 80: bias="SELL"
-    else: bias="FLAT"
+    if pct <= 10:
+        bias = "STRONGBUY"
+    elif pct <= 20:
+        bias = "BUY"
+    elif pct >= 90:
+        bias = "STRONGSELL"
+    elif pct >= 80:
+        bias = "SELL"
+    else:
+        bias = "FLAT"
     return paint_val(f"{pct:.2f}%", bias)
 
 def color_num_bb_width(pct: float) -> str:
-    return paint_val(f"{pct:.2f}%", "FLAT")
+    # BB width alone is neutrality info; highlight extremes slightly
+    if pct < 1.0:
+        bias = "STRONGBUY"
+    elif pct < 2.5:
+        bias = "BUY"
+    elif pct > 10:
+        bias = "STRONGSELL"
+    elif pct > 5:
+        bias = "SELL"
+    else:
+        bias = "FLAT"
+    return paint_val(f"{pct:.2f}%", bias)
 
 def color_num_atr_pct(pct: float) -> str:
-    return paint_val(f"{pct:.2f}%", "FLAT")
+    # Higher ATR% means higher volatility — interpret conservatively
+    if pct >= 2.0:
+        bias = "STRONGSELL"
+    elif pct >= 1.0:
+        bias = "SELL"
+    elif pct <= 0.2:
+        bias = "STRONGBUY"
+    else:
+        bias = "FLAT"
+    return paint_val(f"{pct:.2f}%", bias)
 
 def color_num_stoch(k: float) -> str:
-    if k <= 20: bias="BUY"
-    elif k >= 80: bias="SELL"
-    else: bias="FLAT"
+    if k <= 10:
+        bias = "STRONGBUY"
+    elif k <= 20:
+        bias = "BUY"
+    elif k >= 90:
+        bias = "STRONGSELL"
+    elif k >= 80:
+        bias = "SELL"
+    else:
+        bias = "FLAT"
     return paint_val(f"{k:.2f}", bias)
 
 def color_num_mfi(v: float) -> str:
-    if v <= 20: bias="BUY"
-    elif v >= 80: bias="SELL"
-    else: bias="FLAT"
+    if v <= 10:
+        bias = "STRONGBUY"
+    elif v <= 20:
+        bias = "BUY"
+    elif v >= 90:
+        bias = "STRONGSELL"
+    elif v >= 80:
+        bias = "SELL"
+    else:
+        bias = "FLAT"
     return paint_val(f"{v:.2f}", bias)
 
 def color_num_obv_slope(pct: float) -> str:
-    if abs(pct) < 0.10: bias="FLAT"
-    elif pct > 0: bias="BUY"
-    else: bias="SELL"
+    if abs(pct) >= 5.0:
+        bias = "STRONGBUY" if pct > 0 else "STRONGSELL"
+    elif abs(pct) >= 1.0:
+        bias = "BUY" if pct > 0 else "SELL"
+    else:
+        bias = "FLAT"
     return paint_val(f"{pct:.2f}%", bias)
 
 # ---------- pretty printing helpers ----------
@@ -410,10 +545,23 @@ def print_core_summary(core, symbol: str, *, compact: bool = False):
     # header
     print_header(symbol, CATEGORY, now_str, thresholds, WEIGHTS, duration)
 
-    # compute vote/overall from results
-    vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
-               for tf,r in results.items())
-    overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
+    # compute vote/overall from results using signal multipliers
+    vote = 0
+    for tf, r in results.items():
+        mult = signal_to_multiplier(r.get("sig", "FLAT"))
+        vote += WEIGHTS.get(tf, 1) * mult
+    total_weight = sum(WEIGHTS.get(tf, 1) for tf in results.keys()) or 1
+    strong_th = total_weight * 0.6
+    if vote >= strong_th:
+        overall = "STRONGBUY"
+    elif vote > 0:
+        overall = "BUY"
+    elif vote <= -strong_th:
+        overall = "STRONGSELL"
+    elif vote < 0:
+        overall = "SELL"
+    else:
+        overall = "FLAT"
 
     if compact:
         print_compact(symbol, overall, vote, ORDERED_TF, results, dpcts_tmp)
@@ -436,8 +584,10 @@ def render_strategy_summary(symbol: str, strategy_name: str, core, strategy_deci
     results, dpcts_tmp, duration, now_utc, summary_lines = core
 
     # compute vote for context (kept for logs) but we don't surface it as 'Underlying' here
-    vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
-               for tf,r in results.items())
+    vote = 0
+    for tf, r in results.items():
+        mult = signal_to_multiplier(r.get("sig", "FLAT"))
+        vote += WEIGHTS.get(tf, 1) * mult
 
     # Strategy decision
     strat_sig = strategy_decision.get("sig", "FLAT")
@@ -556,10 +706,24 @@ async def _core_forecast(symbol: str):
             "ai": {"A": ai_A, "B": ai_B, "C": ai_C, "ENS": ai_ens, "agree": ai_agree, "overlay": overlay_applied},
             "ai_deltas": ai_deltas
         }
-    # vote & overall
-    vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
-               for tf,r in results.items())
-    overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
+    # vote & overall using 5-level signals
+    vote = 0
+    for tf, r in results.items():
+        mult = signal_to_multiplier(r.get("sig", "FLAT"))
+        vote += WEIGHTS.get(tf, 1) * mult
+    # compute total weight to decide strong/weak overall thresholds
+    total_weight = sum(WEIGHTS.get(tf, 1) for tf in results.keys()) or 1
+    strong_th = total_weight * 0.6
+    if vote >= strong_th:
+        overall = "STRONGBUY"
+    elif vote > 0:
+        overall = "BUY"
+    elif vote <= -strong_th:
+        overall = "STRONGSELL"
+    elif vote < 0:
+        overall = "SELL"
+    else:
+        overall = "FLAT"
 
     duration = time.perf_counter() - start_time
 
@@ -640,9 +804,9 @@ async def _scalping(symbol: str, *, core=None, compact=False):
         stoch_k = nums.get("stoch_k")
         ai_ens = r["ai"]["ENS"]
         if ema3 is not None and stoch_k is not None:
-            if ema3 > 0 and stoch_k <= 40 and ai_ens == "BUY":
+            if ema3 > 0 and stoch_k <= 40 and ai_ens in ("BUY", "STRONGBUY"):
                 sig = "BUY"; reason.append("EMA up + Stoch recovering + AI")
-            elif ema3 < 0 and stoch_k >= 80:
+            elif ema3 < 0 and stoch_k >= 80 and ai_ens in ("SELL", "STRONGSELL"):
                 sig = "SELL"; reason.append("EMA down + Stoch overbought")
             else:
                 sig = "FLAT"; reason.append("No clear scalping edge")

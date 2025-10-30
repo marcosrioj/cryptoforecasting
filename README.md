@@ -11,8 +11,49 @@ Key features
  - Bybit Kline API (default category = linear)
  - Ensemble ML: LightGBM (price), LightGBM (return→price), ElasticNet (return→price)
  - Technical Indicators: RSI, MACD, EMA, Bollinger Bands, ATR, StochRSI, MFI, OBV
- - Colorized console output for numeric values (green=BUY, yellow=FLAT, red=SELL)
+ - Colorized console output for numeric values (STRONGBUY / BUY = green shades, FLAT = yellow, SELL / STRONGSELL = red shades)
  - Uses closed candles only (no repaint)
+
+New: five-level signal scale
+---------------------------------
+This version uses a five-level signal system everywhere through the script and logs:
+
+- STRONGBUY — strongest bullish signal
+- BUY       — bullish
+- FLAT      — neutral / no-action
+- SELL      — bearish
+- STRONGSELL— strongest bearish signal
+
+Color mapping (console):
+- STRONGBUY : darker green (slightly darker than BUY)
+- BUY       : bright green
+- FLAT      : yellow
+- SELL      : bright red
+- STRONGSELL: darker red (slightly darker than SELL)
+
+How signals are derived
+- Per-timeframe model deltas (predicted vs last) are converted to these five signals using
+  base thresholds (configured by `BUY_BPS` / `SELL_BPS`) and a multiplier for strong signals
+  (default x3). That means a prediction that exceeds the base BUY threshold becomes `BUY`,
+  while one that exceeds 3x that threshold becomes `STRONGBUY`.
+- Indicator helper displays (RSI, MACD, EMA distance, BB position, ATR, StochRSI, MFI, OBV)
+  are mapped to the same five-level labels based on conservative, human-friendly cutoffs.
+- The AI/ensemble predictions produce ENS/A/B/C deltas which are converted to five-level signals
+  the same way and are used by strategies as filters.
+
+Overall aggregation rules
+- Each timeframe's signal is mapped to a numeric multiplier: STRONGBUY=+2, BUY=+1, FLAT=0,
+  SELL=-1, STRONGSELL=-2. The script multiplies the timeframe weight (configured by `WEIGHTS`)
+  by this multiplier and sums across timeframes to compute an aggregate `vote`.
+- The script computes `total_weight = sum(weights for available timeframes)` and treats the
+  overall as `STRONGBUY` if vote >= 0.6 * total_weight, `STRONGSELL` if vote <= -0.6 * total_weight,
+  otherwise `BUY`/`SELL`/`FLAT` depending on sign.
+
+Why this helps
+- The five-level mapping makes strong confluence (many timeframes + strong per-tf signals)
+  surface as a stronger overall recommendation (STRONGBUY / STRONGSELL). Individual indicator
+  fields in the timeframe blocks also expose strength (for example, a very low RSI shows
+  up as STRONGBUY in that indicator column).
 
 Output order: [OVERALL], then 1w, 1d, 4h, 1h, 5m.
 
