@@ -395,8 +395,12 @@ def print_compact(symbol, overall, vote, order_tfs, results, dpcts):
     print("Δ%         : " + " | ".join(dpct_parts))
     print(divider())
 
-# --------- Core run ---------
-async def run_once(symbol: str, *, compact=False):
+# --------- Core run / Strategies ---------
+async def _core_forecast(symbol: str):
+    """Internal: perform the existing multi-timeframe forecast and return structured results.
+
+    Returns a tuple: (results_dict, dpcts_tmp, duration, now_utc, summary_lines)
+    """
     start_time = time.perf_counter()
 
     raw = await fetch_all_tf(symbol)
@@ -463,7 +467,6 @@ async def run_once(symbol: str, *, compact=False):
             "ai": {"A": ai_A, "B": ai_B, "C": ai_C, "ENS": ai_ens, "agree": ai_agree, "overlay": overlay_applied},
             "ai_deltas": ai_deltas
         }
-
     # vote & overall
     vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
                for tf,r in results.items())
@@ -471,20 +474,8 @@ async def run_once(symbol: str, *, compact=False):
 
     duration = time.perf_counter() - start_time
 
-    # ---------- SUMMARY PRINT ----------
+    # ---------- SUMMARY INFO ----------
     now_utc = datetime.now(timezone.utc); now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-    clear_console()
-
-    thresholds = {"buy_bps": BUY_BPS, "sell_bps": SELL_BPS}
-    print_header(SYMBOL, CATEGORY, now_str, thresholds, WEIGHTS, duration)
-
-    if compact:
-        print_compact(SYMBOL, overall, vote, ORDERED_TF, results, dpcts_tmp)
-    else:
-        print_overall(ORDERED_TF, results, vote, overall)
-        for tf in ORDERED_TF:
-            r = results.get(tf)
-            if r: print_timeframe_block(tf, r)
 
     # ---------- SUMMARY LOG (plain text) ----------
     summary_lines = [
@@ -513,9 +504,185 @@ async def run_once(symbol: str, *, compact=False):
 
     _write_summary_log("\n".join(summary_lines) + "\n", now_utc, SYMBOL)
 
+    return results, dpcts_tmp, duration, now_utc, summary_lines
+
+
+async def FirstOne(symbol: str, *, compact=False):
+    """The original strategy (renamed to FirstOne).
+
+    This preserves the behavior of the original script. It runs the multi-timeframe
+    ensemble forecast and prints the human-friendly summary.
+    """
+    results, dpcts_tmp, duration, now_utc, summary_lines = await _core_forecast(symbol)
+    now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    clear_console()
+    thresholds = {"buy_bps": BUY_BPS, "sell_bps": SELL_BPS}
+    print_header(symbol, CATEGORY, now_str, thresholds, WEIGHTS, duration)
+
+    # compute vote/overall from results
+    vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
+               for tf,r in results.items())
+    overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
+
+    if compact:
+        print_compact(symbol, overall, vote, ORDERED_TF, results, dpcts_tmp)
+    else:
+        print_overall(ORDERED_TF, results, vote, overall)
+        for tf in ORDERED_TF:
+            r = results.get(tf)
+            if r: print_timeframe_block(tf, r)
+
+    return {"name": "FirstOne", "results": results, "summary_lines": summary_lines}
+
+
+# Strategy registry: name -> dict(category, fn, description)
+STRATEGIES = {}
+def _register(name: str, category: str, fn, description: str = ""):
+    STRATEGIES[name] = {"category": category, "fn": fn, "description": description}
+
+# ---- Stubs for requested strategies (they may reuse FirstOne logic for now) ----
+async def _scalping(symbol: str, *, compact=False):
+    """Scalping stub: in this version we call the core forecast but note it's a scalping setup.
+    Real scalping would use 1-5m TFs and different risk rules.
+    """
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: Scalping] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "Scalping", "base": res}
+
+async def _breakout_day(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: Breakout Trading] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "BreakoutTrading", "base": res}
+
+async def _range_trading(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: Range Trading] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "RangeTrading", "base": res}
+
+async def _ai_ml(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: AI_ML] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "AI_ML", "base": res}
+
+async def _multi_indicator(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: MultiIndicator] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "MultiIndicator", "base": res}
+
+async def _price_action(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: PriceAction] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "PriceAction", "base": res}
+
+async def _arbitrage(symbol: str, *, compact=False):
+    # Arbitrage requires exchange book or cross-exchange data; placeholder only.
+    print(f"\n[STRATEGY: Arbitrage] (stub) - not implemented (requires market/exchange spreads)\n")
+    return {"name": "Arbitrage", "note": "not implemented"}
+
+async def _trend_following(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: TrendFollowing Swing] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "TrendFollowing", "base": res}
+
+async def _breakout_momentum_swing(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: BreakoutMomentumSwing] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "BreakoutMomentumSwing", "base": res}
+
+async def _support_resistance_swing(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: SupportResistanceSwing] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "SupportResistanceSwing", "base": res}
+
+async def _sentiment_swing(symbol: str, *, compact=False):
+    print(f"\n[STRATEGY: SentimentSwing] (stub) - not implemented (requires social APIs)\n")
+    return {"name": "SentimentSwing", "note": "not implemented"}
+
+async def _ichimoku_swing(symbol: str, *, compact=False):
+    res = await FirstOne(symbol, compact=compact)
+    print(f"\n[STRATEGY: IchimokuSwing] (stub) - executed FirstOne core for symbol {symbol}\n")
+    return {"name": "IchimokuSwing", "base": res}
+
+async def _hodl(symbol: str, *, compact=False):
+    print(f"\n[STRATEGY: HODL] (stub) - long-term buy-and-hold; no per-run action.\n")
+    return {"name": "HODL", "note": "long-term strategy - no action"}
+
+async def _dca(symbol: str, *, compact=False):
+    print(f"\n[STRATEGY: DCA] (stub) - dollar-cost-averaging simulation not implemented here.\n")
+    return {"name": "DCA", "note": "not implemented"}
+
+async def _staking(symbol: str, *, compact=False):
+    print(f"\n[STRATEGY: Staking] (stub) - staking/yield tracking not implemented here.\n")
+    return {"name": "Staking", "note": "not implemented"}
+
+async def _diversified(symbol: str, *, compact=False):
+    print(f"\n[STRATEGY: Diversified] (stub) - portfolio management not implemented here.\n")
+    return {"name": "Diversified", "note": "not implemented"}
+
+async def _value_investing(symbol: str, *, compact=False):
+    print(f"\n[STRATEGY: ValueInvesting] (stub) - deep fundamental analysis not implemented here.\n")
+    return {"name": "ValueInvesting", "note": "not implemented"}
+
+# Register strategies
+_register("FirstOne", "Default", FirstOne, "Original forecasting strategy (default)")
+_register("Scalping", "Day Trading", _scalping, "Scalping day-trading stub")
+_register("Breakout", "Day Trading", _breakout_day, "Breakout day-trading stub")
+_register("RangeTrading", "Day Trading", _range_trading, "Range trading stub")
+_register("AI_ML", "Day Trading", _ai_ml, "AI/ML day-trading stub")
+_register("MultiIndicator", "Day Trading", _multi_indicator, "Multi-indicator day-trading stub")
+_register("PriceAction", "Day Trading", _price_action, "Price action / ICT stub")
+_register("Arbitrage", "Day Trading", _arbitrage, "Arbitrage stub")
+
+_register("TrendFollowing", "Swing Trading", _trend_following, "Trend-following swing stub")
+_register("BreakoutMomentumSwing", "Swing Trading", _breakout_momentum_swing, "Breakout/momentum swing stub")
+_register("SupportResistanceSwing", "Swing Trading", _support_resistance_swing, "Support/resistance swing stub")
+_register("SentimentSwing", "Swing Trading", _sentiment_swing, "Sentiment/news swing stub")
+_register("IchimokuSwing", "Swing Trading", _ichimoku_swing, "Ichimoku swing stub")
+
+_register("HODL", "Long-Term", _hodl, "Buy-and-hold long-term stub")
+_register("DCA", "Long-Term", _dca, "Dollar-cost-averaging stub")
+_register("Staking", "Long-Term", _staking, "Staking/yield stub")
+_register("Diversified", "Long-Term", _diversified, "Diversified portfolio stub")
+_register("ValueInvesting", "Long-Term", _value_investing, "Value investing stub")
+
+
+async def run_once(symbol: str, *, strategy_name: str = None, strategy_category: str = None, compact=False):
+    """Run one or more strategies for the symbol.
+
+    If strategy_name provided, runs that strategy. If strategy_category provided, runs all strategies
+    that belong to that category. If neither provided, runs FirstOne (original behavior).
+    """
+    # determine which strategies to run
+    to_run = []
+    if strategy_name:
+        s = STRATEGIES.get(strategy_name)
+        if not s:
+            print(f"Unknown strategy '{strategy_name}'. Available: {list(STRATEGIES.keys())}")
+            return
+        to_run.append((strategy_name, s["fn"]))
+    elif strategy_category:
+        for name, meta in STRATEGIES.items():
+            if meta["category"].lower() == strategy_category.lower():
+                to_run.append((name, meta["fn"]))
+        if not to_run:
+            print(f"No strategies found for category '{strategy_category}'. Available categories: "
+                  f"{sorted(set(m["category"] for m in STRATEGIES.values()))}")
+            return
+    else:
+        to_run.append(("FirstOne", STRATEGIES["FirstOne"]["fn"]))
+
+    for name, fn in to_run:
+        print(divider())
+        print(f"Running strategy: {name} (category={STRATEGIES[name]['category']})")
+        try:
+            await fn(symbol, compact=compact)
+        except TypeError:
+            # fallback if strategy does not accept compact arg
+            await fn(symbol)
+
 # --------- Scheduler / CLI ---------
-async def scheduler_loop(loop: bool, every: int, symbol: str, *, compact=False):
-    await run_once(symbol, compact=compact)  # immediate first run
+async def scheduler_loop(loop: bool, every: int, symbol: str, *, strategy_name: str = None, strategy_category: str = None, compact=False):
+    await run_once(symbol, strategy_name=strategy_name, strategy_category=strategy_category, compact=compact)  # immediate first run
     if not loop:
         return
     while True:
@@ -525,7 +692,7 @@ async def scheduler_loop(loop: bool, every: int, symbol: str, *, compact=False):
         else:
             wait = every
         await asyncio.sleep(wait)
-        await run_once(symbol, compact=compact)
+        await run_once(symbol, strategy_name=strategy_name, strategy_category=strategy_category, compact=compact)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Bybit Multi-timeframe Forecast")
@@ -534,6 +701,8 @@ def parse_args():
     p.add_argument("--every", type=int, default=300, help="Seconds between runs when --loop (default: 300)")
     p.add_argument("--category", default=CATEGORY, help="Bybit category: linear, inverse, spot (default: linear)")
     p.add_argument("--compact", action="store_true", help="Compact summary mode")
+    p.add_argument("--strategy", default=None, help="Strategy name to run (e.g., FirstOne, Scalping).")
+    p.add_argument("--strategy-category", default=None, help="Strategy category to run (Day Trading, Swing Trading, Long-Term).")
     p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     p.add_argument("--no-icons", action="store_true", help="Disable icons/emojis")
     return p.parse_args()
@@ -544,4 +713,6 @@ if __name__ == "__main__":
     CATEGORY = args.category
     _set_color(not args.no_color)
     ICONS_ENABLED = not args.no_icons
-    asyncio.run(scheduler_loop(loop=args.loop, every=args.every, symbol=SYMBOL, compact=args.compact))
+    asyncio.run(scheduler_loop(loop=args.loop, every=args.every, symbol=SYMBOL,
+                              strategy_name=args.strategy, strategy_category=args.strategy_category,
+                              compact=args.compact))
