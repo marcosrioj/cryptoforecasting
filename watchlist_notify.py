@@ -46,6 +46,16 @@ def get_env(name: str, default=None):
     return os.environ.get(name, default)
 
 
+def normalize_symbol(s: str) -> str:
+    """Normalize a user-provided symbol: append USDT for short alphabetic tokens (e.g. 'OL' -> 'OLUSDT')."""
+    if not s:
+        return s
+    s = s.strip().upper()
+    if len(s) <= 5 and s.isalpha() and not s.endswith("USDT"):
+        return s + "USDT"
+    return s
+
+
 def send_email(subject: str, body: str, recipient: str, smtp_user: str, smtp_pass: str,
                smtp_host: str = "smtp.gmail.com", smtp_port: int = 465):
     if not smtp_user or not smtp_pass:
@@ -143,20 +153,71 @@ async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False, con
             # readable in plain-text clients.
             buf = io.StringIO()
             try:
+                # First, call each strategy while capturing their return dicts (but not printing)
+                strat_caps = {}
+                for name, meta in getattr(cf, "STRATEGIES", {}).items():
+                    fn = meta.get("fn")
+                    try:
+                        tmp_buf = io.StringIO()
+                        with contextlib.redirect_stdout(tmp_buf):
+                            try:
+                                res = await fn(s, core=(results, dpcts_tmp, duration, now_utc, summary_lines), compact=compact)
+                            except TypeError:
+                                res = await fn(s)
+                    except Exception:
+                        res = None
+                    if isinstance(res, dict):
+                        strat_caps[name] = res
+
+                # Aggregate strategy-level votes (excluding FirstOne) to compute overall
+                strat_vote = 0
+                for name, r in strat_caps.items():
+                    if name == "FirstOne":
+                        continue
+                    sig = r.get("signal") or r.get("sig")
+                    if sig:
+                        strat_vote += cf.signal_to_multiplier(sig)
+                n_strats = max(1, len(getattr(cf, "STRATEGIES", {})))
+                max_strat_weight = 2 * n_strats
+                strat_strong_th = int(max_strat_weight * 0.7)
+                if strat_vote >= strat_strong_th:
+                    overall_from_strats = "STRONGBUY"
+                elif strat_vote > 0:
+                    overall_from_strats = "BUY"
+                elif strat_vote <= -strat_strong_th:
+                    overall_from_strats = "STRONGSELL"
+                elif strat_vote < 0:
+                    overall_from_strats = "SELL"
+                else:
+                    overall_from_strats = "FLAT"
+
+                # Now render core summary with the strategy-derived overall, and
+                # append each strategy block (prefer printing via render when we
+                # have captured data to avoid recomputation).
                 with contextlib.redirect_stdout(buf):
-                    # Print the shared core summary (timeframes, overall)
-                    cf.print_core_summary((results, dpcts_tmp, duration, now_utc, summary_lines), s, compact=compact)
-                    # Run each registered strategy to allow them to append their blocks
+                    cf.print_core_summary((results, dpcts_tmp, duration, now_utc, summary_lines), s, compact=compact, overall_override=overall_from_strats)
                     for name, meta in getattr(cf, "STRATEGIES", {}).items():
-                        fn = meta.get("fn")
-                        try:
-                            # most strategy functions accept (symbol, core=..., compact=...)
-                            await fn(s, core=(results, dpcts_tmp, duration, now_utc, summary_lines), compact=compact)
-                        except TypeError:
-                            # fallback to older signature
-                            await fn(s)
-            except Exception as e:
-                # If anything fails during rendering, fall back to the plain summary lines
+                        if name in strat_caps:
+                            # Print using the captured decision via render_strategy_summary
+                            cap = strat_caps[name]
+                            try:
+                                cf.render_strategy_summary(s, name, (results, dpcts_tmp, duration, now_utc, summary_lines), {"sig": cap.get("signal") or cap.get("sig"), "reason": cap.get("reason")}, compact=compact)
+                            except Exception:
+                                # fallback: call the function to print
+                                fn = meta.get("fn")
+                                try:
+                                    await fn(s, core=(results, dpcts_tmp, duration, now_utc, summary_lines), compact=compact)
+                                except TypeError:
+                                    await fn(s)
+                        else:
+                            # No captured return — call the strategy to print its block
+                            fn = meta.get("fn")
+                            try:
+                                await fn(s, core=(results, dpcts_tmp, duration, now_utc, summary_lines), compact=compact)
+                            except TypeError:
+                                await fn(s)
+            except Exception:
+                # On any failure, fall back to raw summary_lines
                 buf = io.StringIO()
                 buf.write("".join([l + "\n" for l in summary_lines]))
 
@@ -222,7 +283,7 @@ async def hourly_loop(symbols, smtp_user, smtp_pass, email_to, run_once=False, c
 def build_watchlist_from_env():
     raw = get_env("WATCHLIST")
     if raw:
-        return [x.strip().upper() for x in raw.split(",") if x.strip()]
+        return [normalize_symbol(x) for x in raw.split(",") if x.strip()]
     return DEFAULT_WATCHLIST
 
 
@@ -241,7 +302,7 @@ def main():
     email_to = args.email_to or get_env("EMAIL_TO") or smtp_user
 
     if args.symbols:
-        symbols = [x.strip().upper() for x in args.symbols.split(",") if x.strip()]
+        symbols = [normalize_symbol(x) for x in args.symbols.split(",") if x.strip()]
     else:
         symbols = build_watchlist_from_env()
 

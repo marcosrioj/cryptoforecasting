@@ -125,6 +125,23 @@ def trim_to_last_closed(df: pd.DataFrame, code: str) -> pd.DataFrame:
     cutoff = pd.to_datetime(last_closed_open_time(code)).tz_convert(None)
     return df[df["ts"] <= cutoff].sort_values("ts").reset_index(drop=True)
 
+
+def normalize_symbol(s: str) -> str:
+    """Normalize a user-provided symbol.
+
+    If a short alphabetic symbol is provided (e.g. 'OL' or 'BTC'), append 'USDT'.
+    Leaves symbols that already end with 'USDT' unchanged. This is a conservative
+    helper to reduce common user typos where they omit the quote suffix.
+    """
+    if not s:
+        return s
+    s = s.strip().upper()
+    # If user provided a short alphabetic token (<=5 chars) and it doesn't end with USDT,
+    # append USDT. This avoids mangling longer or already-qualified symbols.
+    if len(s) <= 5 and s.isalpha() and not s.endswith("USDT"):
+        return s + "USDT"
+    return s
+
 # --------- helpers for formatting like raw last ---------
 def decimals_in_str(num_str: str) -> int:
     if "." not in num_str:
@@ -675,7 +692,8 @@ async def _core_forecast(symbol: str):
             filled = int(w * max(0, min(100, pct)) / 100)
             bar = "█" * filled + "-" * (w - filled)
             # carriage return to overwrite the same line
-            print(f"\rProgress: [{bar}] {pct:3d}% {msg}", end="", flush=True)
+            # Include the symbol being processed for clarity when running many pairs
+            print(f"\rProgress {symbol}: [{bar}] {pct:3d}% {msg}", end="", flush=True)
         except Exception:
             # If anything goes wrong with progress printing, ignore it.
             pass
@@ -1173,6 +1191,11 @@ async def run_once(symbol: str, *, compact=False):
     strat_vote = 0
     n_strats = len(strategy_results) or 1
     for r in strategy_results:
+        name = r.get("name")
+        # exclude the original FirstOne from the strategy aggregation so the
+        # overall reflects the other named strategies (user-requested behavior)
+        if name == "FirstOne":
+            continue
         sig = r.get("signal") or r.get("sig")
         if sig:
             strat_vote += signal_to_multiplier(sig)
@@ -1281,8 +1304,8 @@ def interactive_fill_args(args: argparse.Namespace) -> argparse.Namespace:
         return args
 
     print("Interactive mode — configure runtime parameters. Press Enter to accept the default shown.")
-    # Symbol
-    args.symbol = _ask("Symbol (e.g. BTCUSDT)", default=args.symbol).upper()
+    # Symbol (normalize and append USDT if user entered a short token)
+    args.symbol = normalize_symbol(_ask("Symbol (e.g. BTCUSDT)", default=args.symbol))
 
     # Loop (boolean)
     args.loop = _ask_bool("Run continuously (loop)?", default=args.loop)
@@ -1313,7 +1336,7 @@ def interactive_fill_args(args: argparse.Namespace) -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     args = interactive_fill_args(args)
-    SYMBOL = args.symbol.upper()
+    SYMBOL = normalize_symbol(args.symbol)
     CATEGORY = args.category
     _set_color(not args.no_color)
     ICONS_ENABLED = not args.no_icons
