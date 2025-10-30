@@ -326,13 +326,31 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         print(f"[autotrade][DRY] Would close any existing position for {symbol} by market")
         print(f"[autotrade][DRY] Would open {side} {qty} {symbol} (notional {TRADE_USDT} USDT at x{LEVERAGE})")
         print(f"[autotrade][DRY] TP={tp_price:.8f} SL={sl_price:.8f} (tp_pct={tp_pct:.4f}%)")
-        # If API keys are present we can still list current active positions for context
-        pos_list = []
-        if BYBIT_API_KEY and BYBIT_API_SECRET:
-            async with aiohttp.ClientSession() as sess:
-                pos_list = await fetch_positions_list(sess, symbol)
-        print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True)
-        return
+        # Interactive override: offer to execute live immediately when running in a TTY
+        if sys.stdin.isatty():
+            proceed_live = _ask_bool("Dry-run is enabled — execute LIVE order now?", default=False)
+            if proceed_live:
+                if not (BYBIT_API_KEY and BYBIT_API_SECRET):
+                    print("[autotrade] Cannot execute live order: BYBIT_API_KEY/BYBIT_API_SECRET not set")
+                else:
+                    print("[autotrade] Proceeding to execute LIVE order as requested")
+                    dry_run = False
+            else:
+                # If user declines, just show summary and return
+                pos_list = []
+                if BYBIT_API_KEY and BYBIT_API_SECRET:
+                    async with aiohttp.ClientSession() as sess:
+                        pos_list = await fetch_positions_list(sess, symbol)
+                print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True)
+                return
+        else:
+            # Non-interactive: show summary and return
+            pos_list = []
+            if BYBIT_API_KEY and BYBIT_API_SECRET:
+                async with aiohttp.ClientSession() as sess:
+                    pos_list = await fetch_positions_list(sess, symbol)
+            print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True)
+            return
 
     # Live mode: perform API calls
     async with aiohttp.ClientSession() as sess:
@@ -371,9 +389,9 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         # 3) place market order to open position
         open_res = await place_market_order(sess, symbol, side, qty=qty, reduce_only=False, take_profit=tp_price, stop_loss=sl_price)
         print(f"[autotrade] Open order response: {open_res}")
-    # after placing order, fetch current positions and print a UX summary
-    pos_list_after = await fetch_positions_list(sess, symbol)
-    print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=open_res, pos_list=pos_list_after, dry_run=False)
+        # after placing order, fetch current positions and print a UX summary (inside same session)
+        pos_list_after = await fetch_positions_list(sess, symbol)
+        print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=open_res, pos_list=pos_list_after, dry_run=False)
 
 # Scheduler: align to 5-minute boundaries and run forever (or once)
 async def scheduler(symbol: str, dry_run: bool = True, once: bool = False):
