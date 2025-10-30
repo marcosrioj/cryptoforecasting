@@ -395,6 +395,54 @@ def print_compact(symbol, overall, vote, order_tfs, results, dpcts):
     print("Δ%         : " + " | ".join(dpct_parts))
     print(divider())
 
+
+def render_strategy_summary(symbol: str, strategy_name: str, core, strategy_decision: dict, compact: bool = False):
+    """Render a consistent summary for any strategy using the shared core results.
+
+    strategy_decision: dict with keys 'sig' (BUY/SELL/FLAT) and optional 'reason' and 'meta'
+    """
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    clear_console()
+    thresholds = {"buy_bps": BUY_BPS, "sell_bps": SELL_BPS}
+    # show strategy name in the header category field
+    print_header(symbol, f"{CATEGORY} | {strategy_name}", now_str, thresholds, WEIGHTS, duration)
+
+    # compute underlying overall (from core results)
+    vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
+               for tf,r in results.items())
+    underlying_overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
+
+    # Strategy decision
+    strat_sig = strategy_decision.get("sig", "FLAT")
+    reason = strategy_decision.get("reason", [])
+    if isinstance(reason, list):
+        reason_txt = "; ".join(reason)
+    else:
+        reason_txt = str(reason)
+
+    # print underlying overall and then the strategy decision
+    print(("🧭 " if ICONS_ENABLED else "") + f"[UNDERLYING OVERALL] {underlying_overall} (vote={vote})")
+    print(divider())
+    print(f"Strategy   : {strategy_name}")
+    print(f"Decision   : {_color_signal_word(strat_sig)}  Reason: {reason_txt}")
+    print(divider())
+
+    if compact:
+        print_compact(symbol, underlying_overall, vote, ORDERED_TF, results, dpcts_tmp)
+    else:
+        print_overall(ORDERED_TF, results, vote, underlying_overall)
+        for tf in ORDERED_TF:
+            r = results.get(tf)
+            if r:
+                print_timeframe_block(tf, r)
+
+    # also write a summary log for the strategy decision
+    log_lines = [f"STRATEGY: {strategy_name}", f"Decision: {strat_sig}", f"Reason: {reason_txt}", ""]
+    log_lines.extend(summary_lines)
+    _write_summary_log("\n".join(log_lines) + "\n", now_utc, symbol)
+    return {"name": strategy_name, "signal": strat_sig, "reason": reason_txt}
+
 # --------- Core run / Strategies ---------
 async def _core_forecast(symbol: str):
     """Internal: perform the existing multi-timeframe forecast and return structured results.
@@ -541,87 +589,222 @@ def _register(name: str, category: str, fn, description: str = ""):
     STRATEGIES[name] = {"category": category, "fn": fn, "description": description}
 
 # ---- Stubs for requested strategies (they may reuse FirstOne logic for now) ----
-async def _scalping(symbol: str, *, compact=False):
-    """Scalping stub: in this version we call the core forecast but note it's a scalping setup.
-    Real scalping would use 1-5m TFs and different risk rules.
+async def _scalping(symbol: str, *, core=None, compact=False):
+    """Scalping: focus on 5m TF. Simple rule:
+    - BUY when short EMA > mid EMA, stoch_k < 40 (recovering), and AI ensemble suggests BUY
+    - SELL when short EMA < mid EMA and stoch_k > 80
+    - otherwise FLAT
     """
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: Scalping] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "Scalping", "base": res}
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    tf = "5m"
+    r = results.get(tf)
+    sig = "FLAT"
+    reason = []
+    if r:
+        nums = r["nums"]
+        ema3 = nums.get("ema_diff_pct")  # actually percent diff 3 vs 24
+        stoch_k = nums.get("stoch_k")
+        ai_ens = r["ai"]["ENS"]
+        if ema3 is not None and stoch_k is not None:
+            if ema3 > 0 and stoch_k <= 40 and ai_ens == "BUY":
+                sig = "BUY"; reason.append("EMA up + Stoch recovering + AI")
+            elif ema3 < 0 and stoch_k >= 80:
+                sig = "SELL"; reason.append("EMA down + Stoch overbought")
+            else:
+                sig = "FLAT"; reason.append("No clear scalping edge")
+    # render summary
+    return render_strategy_summary(symbol, "Scalping", core, {"sig": sig, "reason": reason}, compact=compact)
 
-async def _breakout_day(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: Breakout Trading] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "BreakoutTrading", "base": res}
+async def _breakout_day(symbol: str, *, core=None, compact=False):
+    """Breakout day trading: look for breakout on 5m over recent range and volume confirmation."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    tf = "5m"
+    r = results.get(tf)
+    sig = "FLAT"
+    reason = []
+    if r:
+        # We need raw data to check recent highs/volumes — try to access feature arrays via make_features not stored;
+        # fallback to AI ensemble delta
+        dpct = r.get("dpct", 0.0)
+        last = r.get("last", 0.0)
+        # breakout if dpct > 0.5% (arbitrary) and volume spike (use obv_slope_pct as proxy)
+        vol_proxy = r["nums"].get("obv_slope_pct", 0.0)
+        if dpct >= 0.5 and vol_proxy > 1.0:
+            sig = "BUY"; reason.append("Price breakout + volume spike")
+        elif dpct <= -0.5 and vol_proxy < -1.0:
+            sig = "SELL"; reason.append("Breakdown + volume spike")
+        else:
+            reason.append("No confirmed breakout")
+    return render_strategy_summary(symbol, "Breakout", core, {"sig": sig, "reason": reason}, compact=compact)
 
-async def _range_trading(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: Range Trading] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "RangeTrading", "base": res}
+async def _range_trading(symbol: str, *, core=None, compact=False):
+    """Range trading (mean reversion): use BB position on 1h/5m to buy near bottom, sell near top."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    # check 1h first, then 5m
+    for tf in ("1h","5m"):
+        r = results.get(tf)
+        if not r: continue
+        bb_pos = r["nums"].get("bb_pos_pct", 50.0)
+        if bb_pos <= 20:
+            reason = [f"BB pos {bb_pos:.1f}% on {tf}"]
+            return render_strategy_summary(symbol, "RangeTrading", core, {"sig": "BUY", "reason": reason}, compact=compact)
+        if bb_pos >= 80:
+            reason = [f"BB pos {bb_pos:.1f}% on {tf}"]
+            return render_strategy_summary(symbol, "RangeTrading", core, {"sig": "SELL", "reason": reason}, compact=compact)
+    return render_strategy_summary(symbol, "RangeTrading", core, {"sig": "FLAT", "reason": ["No range entry conditions"]}, compact=compact)
 
-async def _ai_ml(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: AI_ML] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "AI_ML", "base": res}
+async def _ai_ml(symbol: str, *, core=None, compact=False):
+    """AI/ML strategy: rely on ensemble ENS delta on 1h and 5m — stronger weight to 1h for day trading."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    score = 0.0
+    # weight 1h more
+    for tf, w in (("1h", 0.7), ("5m", 0.3)):
+        r = results.get(tf)
+        if not r: continue
+        ens_pct = r["ai_deltas"].get("ENS", 0.0)
+        score += ens_pct * w
+    sig = decide_signal(score)
+    return render_strategy_summary(symbol, "AI_ML", core, {"sig": sig, "reason": [f"score={score:.3f}%"]}, compact=compact)
 
-async def _multi_indicator(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: MultiIndicator] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "MultiIndicator", "base": res}
+async def _multi_indicator(symbol: str, *, core=None, compact=False):
+    """Multi-indicator high-win-rate style: require confluence across EMA trend, RSI, and Stoch on 1h or 4h."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    for tf in ("1h","4h"):
+        r = results.get(tf)
+        if not r: continue
+        nums = r["nums"]
+        ema_diff = nums.get("ema_diff_pct", 0.0)
+        rsi = r.get("rsi", 50.0)
+        stoch_k = nums.get("stoch_k", 50.0)
+        if ema_diff > 0 and rsi < 60 and stoch_k < 50:
+            return render_strategy_summary(symbol, "MultiIndicator", core, {"sig": "BUY", "reason": [f"confluence on {tf} (EMA+, RSI{rsi:.0f}, Stoch{stoch_k:.0f})"]}, compact=compact)
+        if ema_diff < 0 and rsi > 40 and stoch_k > 50:
+            return render_strategy_summary(symbol, "MultiIndicator", core, {"sig": "SELL", "reason": [f"confluence on {tf} (EMA-, RSI{rsi:.0f}, Stoch{stoch_k:.0f})"]}, compact=compact)
+    return render_strategy_summary(symbol, "MultiIndicator", core, {"sig": "FLAT", "reason": ["No confluence"]}, compact=compact)
 
-async def _price_action(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: PriceAction] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "PriceAction", "base": res}
+async def _price_action(symbol: str, *, core=None, compact=False):
+    """Price action / liquidity-based: look for wick+rejection patterns on 1h/4h as proxy for ICT setups."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    for tf in ("1h","4h"):
+        r = results.get(tf)
+        if not r: continue
+        nums = r["nums"]
+        atr = nums.get("atr_pct", 0.0)
+        last = r.get("last", 0.0)
+        bb_pos = nums.get("bb_pos_pct", 50.0)
+        # simple heuristic: if BB pos near top but recent MACD negative => liquidity grab => BUY
+        if bb_pos >= 80 and r.get("macd", 0.0) < 0:
+            return render_strategy_summary(symbol, "PriceAction", core, {"sig": "BUY", "reason": [f"liquidity grab on {tf}"]}, compact=compact)
+        if bb_pos <= 20 and r.get("macd", 0.0) > 0:
+            return render_strategy_summary(symbol, "PriceAction", core, {"sig": "SELL", "reason": [f"lower liquidity grab on {tf}"]}, compact=compact)
+    return render_strategy_summary(symbol, "PriceAction", core, {"sig": "FLAT", "reason": ["No PA setups"]}, compact=compact)
 
-async def _arbitrage(symbol: str, *, compact=False):
-    # Arbitrage requires exchange book or cross-exchange data; placeholder only.
-    print(f"\n[STRATEGY: Arbitrage] (stub) - not implemented (requires market/exchange spreads)\n")
-    return {"name": "Arbitrage", "note": "not implemented"}
+async def _arbitrage(symbol: str, *, core=None, compact=False):
+    # Arbitrage requires cross-exchange orderbook data; cannot implement from Bybit klines only.
+    return render_strategy_summary(symbol, "Arbitrage", core, {"sig": "FLAT", "reason": ["not implemented: requires cross-exchange orderbook/spread data"]}, compact=compact)
 
-async def _trend_following(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: TrendFollowing Swing] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "TrendFollowing", "base": res}
+async def _trend_following(symbol: str, *, core=None, compact=False):
+    """Trend-following swing: look at 4h and 1d EMA trends; buy on pullbacks in uptrend."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    for tf in ("1d","4h"):
+        r = results.get(tf)
+        if not r: continue
+        ema_diff = r["nums"].get("ema_diff_pct", 0.0)
+        rsi = r.get("rsi", 50.0)
+        if ema_diff > 0 and rsi < 55:
+            return render_strategy_summary(symbol, "TrendFollowing", core, {"sig": "BUY", "reason": [f"EMA up, RSI {rsi:.0f} on {tf}"]}, compact=compact)
+        if ema_diff < 0 and rsi > 45:
+            return render_strategy_summary(symbol, "TrendFollowing", core, {"sig": "SELL", "reason": [f"EMA down, RSI {rsi:.0f} on {tf}"]}, compact=compact)
+    return render_strategy_summary(symbol, "TrendFollowing", core, {"sig": "FLAT", "reason": ["No trend entries"]}, compact=compact)
 
-async def _breakout_momentum_swing(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: BreakoutMomentumSwing] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "BreakoutMomentumSwing", "base": res}
+async def _breakout_momentum_swing(symbol: str, *, core=None, compact=False):
+    """Swing breakout: detect daily breakout above recent resistance (30-day range) with rising volume."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    r = results.get("1d")
+    if not r:
+        return render_strategy_summary(symbol, "BreakoutMomentumSwing", core, {"sig": "FLAT", "reason": ["no daily data"]}, compact=compact)
+    # Use dpct as proxy for breakout strength
+    dpct = r.get("dpct", 0.0)
+    obv = r["nums"].get("obv_slope_pct", 0.0)
+    if dpct >= 1.0 and obv > 1.0:
+        return render_strategy_summary(symbol, "BreakoutMomentumSwing", core, {"sig": "BUY", "reason": [f"daily breakout dpct={dpct:.2f}%, OBV_slope={obv:.2f}%"]}, compact=compact)
+    if dpct <= -1.0 and obv < -1.0:
+        return render_strategy_summary(symbol, "BreakoutMomentumSwing", core, {"sig": "SELL", "reason": [f"daily breakdown dpct={dpct:.2f}%"]}, compact=compact)
+    return render_strategy_summary(symbol, "BreakoutMomentumSwing", core, {"sig": "FLAT", "reason": ["no strong breakout"]}, compact=compact)
 
-async def _support_resistance_swing(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: SupportResistanceSwing] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "SupportResistanceSwing", "base": res}
+async def _support_resistance_swing(symbol: str, *, core=None, compact=False):
+    """Support/Resistance swing: use 1d BB pos to trade bounces on daily ranges."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    r = results.get("1d")
+    if not r:
+        return render_strategy_summary(symbol, "SupportResistanceSwing", core, {"sig": "FLAT", "reason": ["no daily data"]}, compact=compact)
+    bb_pos = r["nums"].get("bb_pos_pct", 50.0)
+    if bb_pos <= 25:
+        return render_strategy_summary(symbol, "SupportResistanceSwing", core, {"sig": "BUY", "reason": [f"BB pos {bb_pos:.1f}% on 1d"]}, compact=compact)
+    if bb_pos >= 75:
+        return render_strategy_summary(symbol, "SupportResistanceSwing", core, {"sig": "SELL", "reason": [f"BB pos {bb_pos:.1f}% on 1d"]}, compact=compact)
+    return render_strategy_summary(symbol, "SupportResistanceSwing", core, {"sig": "FLAT", "reason": ["within range mid-band"]}, compact=compact)
 
-async def _sentiment_swing(symbol: str, *, compact=False):
-    print(f"\n[STRATEGY: SentimentSwing] (stub) - not implemented (requires social APIs)\n")
-    return {"name": "SentimentSwing", "note": "not implemented"}
+async def _sentiment_swing(symbol: str, *, core=None, compact=False):
+    # Sentiment requires external social/news APIs. We'll provide a simple volume-spike proxy:
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    r = results.get("1d") or results.get("4h")
+    if not r:
+        return render_strategy_summary(symbol, "SentimentSwing", core, {"sig": "FLAT", "reason": ["no TF data"]}, compact=compact)
+    obv = r["nums"].get("obv_slope_pct", 0.0)
+    if obv > 5.0:
+        return render_strategy_summary(symbol, "SentimentSwing", core, {"sig": "BUY", "reason": [f"OBV_slope={obv:.1f}%"]}, compact=compact)
+    if obv < -5.0:
+        return render_strategy_summary(symbol, "SentimentSwing", core, {"sig": "SELL", "reason": [f"OBV_slope={obv:.1f}%"]}, compact=compact)
+    return render_strategy_summary(symbol, "SentimentSwing", core, {"sig": "FLAT", "reason": ["no strong sentiment proxy"]}, compact=compact)
 
-async def _ichimoku_swing(symbol: str, *, compact=False):
-    res = await FirstOne(symbol, compact=compact)
-    print(f"\n[STRATEGY: IchimokuSwing] (stub) - executed FirstOne core for symbol {symbol}\n")
-    return {"name": "IchimokuSwing", "base": res}
+async def _ichimoku_swing(symbol: str, *, core=None, compact=False):
+    """Simplified Ichimoku-style swing using EMA crossovers as proxy for Tenkan/Kijun."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    r = results.get("4h") or results.get("1h")
+    if not r:
+        return render_strategy_summary(symbol, "IchimokuSwing", core, {"sig": "FLAT", "reason": ["no TF data"]}, compact=compact)
+    nums = r["nums"]
+    # use ema_12 vs ema_24 proxy
+    ema_diff = nums.get("ema_diff_pct", 0.0)
+    if ema_diff > 0:
+        return render_strategy_summary(symbol, "IchimokuSwing", core, {"sig": "BUY", "reason": ["ema12 > ema24 proxy"]}, compact=compact)
+    if ema_diff < 0:
+        return render_strategy_summary(symbol, "IchimokuSwing", core, {"sig": "SELL", "reason": ["ema12 < ema24"]}, compact=compact)
+    return render_strategy_summary(symbol, "IchimokuSwing", core, {"sig": "FLAT", "reason": ["no clear signal"]}, compact=compact)
 
-async def _hodl(symbol: str, *, compact=False):
-    print(f"\n[STRATEGY: HODL] (stub) - long-term buy-and-hold; no per-run action.\n")
-    return {"name": "HODL", "note": "long-term strategy - no action"}
+async def _hodl(symbol: str, *, core=None, compact=False):
+    """HODL: recommend holding — check if long-term trend is favorable (1w EMA)."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    r = results.get("1w")
+    if not r:
+        return render_strategy_summary(symbol, "HODL", core, {"sig": "HOLD", "reason": ["No weekly data"]}, compact=compact)
+    ema_diff = r["nums"].get("ema_diff_pct", 0.0)
+    if ema_diff > 0:
+        return render_strategy_summary(symbol, "HODL", core, {"sig": "HOLD", "reason": ["long-term up"]}, compact=compact)
+    else:
+        return render_strategy_summary(symbol, "HODL", core, {"sig": "HOLD", "reason": ["long-term down"]}, compact=compact)
 
-async def _dca(symbol: str, *, compact=False):
-    print(f"\n[STRATEGY: DCA] (stub) - dollar-cost-averaging simulation not implemented here.\n")
-    return {"name": "DCA", "note": "not implemented"}
+async def _dca(symbol: str, *, core=None, compact=False):
+    """DCA helper: recommend DCA buy when price below N-week moving average as a simple rule."""
+    results, dpcts_tmp, duration, now_utc, summary_lines = core
+    r = results.get("1w") or results.get("1d")
+    if not r:
+        return render_strategy_summary(symbol, "DCA", core, {"sig": "HOLD", "reason": ["no data"]}, compact=compact)
+    # if weekly ema indicates price below long-term EMA24 -> suggest DCA buy
+    ema_diff = r["nums"].get("ema_diff_pct", 0.0)
+    if ema_diff < -2.0:
+        return render_strategy_summary(symbol, "DCA", core, {"sig": "BUY", "reason": ["price significantly below long-term EMA"]}, compact=compact)
+    return render_strategy_summary(symbol, "DCA", core, {"sig": "HOLD", "reason": ["No DCA action recommended"]}, compact=compact)
 
-async def _staking(symbol: str, *, compact=False):
-    print(f"\n[STRATEGY: Staking] (stub) - staking/yield tracking not implemented here.\n")
-    return {"name": "Staking", "note": "not implemented"}
+async def _staking(symbol: str, *, core=None, compact=False):
+    return render_strategy_summary(symbol, "Staking", core, {"sig": "FLAT", "reason": ["Requires staking/APY info — not implemented"]}, compact=compact)
 
-async def _diversified(symbol: str, *, compact=False):
-    print(f"\n[STRATEGY: Diversified] (stub) - portfolio management not implemented here.\n")
-    return {"name": "Diversified", "note": "not implemented"}
+async def _diversified(symbol: str, *, core=None, compact=False):
+    return render_strategy_summary(symbol, "Diversified", core, {"sig": "FLAT", "reason": ["Portfolio rebalance logic not implemented"]}, compact=compact)
 
-async def _value_investing(symbol: str, *, compact=False):
-    print(f"\n[STRATEGY: ValueInvesting] (stub) - deep fundamental analysis not implemented here.\n")
-    return {"name": "ValueInvesting", "note": "not implemented"}
+async def _value_investing(symbol: str, *, core=None, compact=False):
+    return render_strategy_summary(symbol, "ValueInvesting", core, {"sig": "FLAT", "reason": ["Requires fundamental data/research — not implemented"]}, compact=compact)
 
 # Register strategies
 _register("FirstOne", "Default", FirstOne, "Original forecasting strategy (default)")
@@ -671,13 +854,15 @@ async def run_once(symbol: str, *, strategy_name: str = None, strategy_category:
     else:
         to_run.append(("FirstOne", STRATEGIES["FirstOne"]["fn"]))
 
+    # run core forecast once and share results to all strategies
+    core = await _core_forecast(symbol)
     for name, fn in to_run:
         print(divider())
         print(f"Running strategy: {name} (category={STRATEGIES[name]['category']})")
         try:
-            await fn(symbol, compact=compact)
+            await fn(symbol, core=core, compact=compact)
         except TypeError:
-            # fallback if strategy does not accept compact arg
+            # fallback if strategy signature older
             await fn(symbol)
 
 # --------- Scheduler / CLI ---------

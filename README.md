@@ -116,9 +116,10 @@ chmod +x cryptoforecast.sh
 Strategies (categories & quick descriptions)
 -------------------------------------------
 The repository now exposes a strategy registry accessible via `--strategy` (run one) or
-`--strategy-category` (run all of a category). Most strategies are initially provided as
-lightweight stubs that either reuse the core forecasting logic (named `FirstOne`) or note
-that additional data/APIs are required.
+`--strategy-category` (run all of a category). Each strategy now receives the shared multi-timeframe
+data and prints a consistent summary template (header, underlying multi-timeframe details, and the
+strategy decision). Some strategies implement full heuristics using the available kline+indicator
+data while a few remain placeholders requiring external data (noted below).
 
 Day Trading
  - Scalping — many quick trades on 1–5m TFs; uses tight stops and fast execution (stub).
@@ -142,6 +143,31 @@ Long-Term Investing
  - Staking & Yield — reward/compounding simulation (requires staking data; stub).
  - Diversified Portfolio — manage basket/rebalance simulation (stub).
  - Value Investing — fundamental, long-term picks (stub).
+
+Implemented strategy logic & usage examples
+-----------------------------------------
+The script now computes the shared multi-timeframe data (1w, 1d, 4h, 1h, 5m) once per run and
+passes it to each strategy. Strategies then apply their own decision logic using that shared data.
+
+Implemented (heuristic) strategies
+ - Scalping (Day Trading): uses the 5m timeframe (EMA short vs mid, StochRSI and AI ensemble as filter).
+ - Breakout (Day Trading): breakout detection on 5m with volume confirmation proxy (OBV slope).
+ - RangeTrading (Day Trading): Bollinger Bands position on 1h/5m to enter mean-reversion trades.
+ - AI_ML (Day Trading): ensemble ENS delta weighted across 1h/5m.
+ - MultiIndicator (Day Trading): confluence on 1h/4h of EMA trend + RSI + Stoch.
+ - PriceAction (Day Trading): wick/liquidity heuristics on 1h/4h (BB position + MACD).
+
+Implemented Swing strategies (heuristic)
+ - TrendFollowing: 1d/4h EMA trend + RSI pullback entries.
+ - BreakoutMomentumSwing: daily breakout strength + OBV slope.
+ - SupportResistanceSwing: daily BB position bounces.
+ - IchimokuSwing: simplified Ichimoku proxy using EMA crossovers.
+ - SentimentSwing: volume/OBV proxy for sentiment (note: uses volume as a proxy; real sentiment needs APIs).
+
+Long-term helpers
+ - HODL: uses weekly EMA trend to label HOLD and give a simple note.
+ - DCA: recommends DCA buys when price is significantly below the long-term EMA.
+ - Staking/Diversified/ValueInvesting/Arbitrage: placeholders — require external data (staking APYs, portfolio holdings, fundamentals, or cross-exchange orderbooks).
 
 Usage examples (strategies)
 --------------------------
