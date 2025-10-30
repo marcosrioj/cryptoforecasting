@@ -29,7 +29,9 @@ LIMITS     = {"1w": 520, "1d": 1500, "4h": 1500, "1h": 1500, "5m": 1500}
 # Per-timeframe minimum history
 MIN_ROWS_TF = {"1w": 30, "1d": 200, "4h": 200, "1h": 200, "5m": 200}
 
-BUY_BPS, SELL_BPS = 10, -10
+# Base thresholds in basis points (1 bps = 0.01%). Raising these makes BUY/SELL
+# require larger predicted moves; STRONG signals require a multiple of this value.
+BUY_BPS, SELL_BPS = 15, -15
 WEIGHTS = {"1w": 5, "1d": 4, "4h": 3, "1h": 2, "5m": 1}
 SEED = 42
 W_PRICE, W_RET_LGB, W_RET_EN = 0.5, 0.3, 0.2
@@ -228,9 +230,9 @@ def decide_signal(dpct):
     Uses default BUY_BPS/SELL_BPS as base thresholds and a multiple for strong signals.
     """
     bps = dpct * 100
-    # Strong thresholds: 3x base threshold (reasonable default). If you want different tuning,
-    # adjust STRONG_MULTIPLIER.
-    STRONG_MULTIPLIER = 3
+    # Strong thresholds: larger multiplier makes STRONG{BUY/SELL} rarer.
+    # Increasing this value makes STRONGBUY/STRONGSELL harder to reach.
+    STRONG_MULTIPLIER = 5
     strong_buy = BUY_BPS * STRONG_MULTIPLIER
     strong_sell = SELL_BPS * STRONG_MULTIPLIER
     if bps >= strong_buy:
@@ -551,7 +553,9 @@ def print_core_summary(core, symbol: str, *, compact: bool = False):
         mult = signal_to_multiplier(r.get("sig", "FLAT"))
         vote += WEIGHTS.get(tf, 1) * mult
     total_weight = sum(WEIGHTS.get(tf, 1) for tf in results.keys()) or 1
-    strong_th = total_weight * 0.6
+    # Require a larger fraction of the available weight to be aligned for an
+    # overall STRONGBUY / STRONGSELL. Raising this fraction reduces false positives.
+    strong_th = total_weight * 0.7
     if vote >= strong_th:
         overall = "STRONGBUY"
     elif vote > 0:

@@ -26,10 +26,21 @@ signal system, the strategy registry, and the SMTP-only watchlist notifier.
 - SELL      — bearish
 - STRONGSELL— strongest bearish signal
 
-Signals derive from model deltas and indicator heuristics using conservative cutoffs and a
-"strong" multiplier (default x3). Timeframe signals map to multipliers (STRONGBUY=+2, BUY=+1,
-FLAT=0, SELL=-1, STRONGSELL=-2). The aggregate `vote` across timeframes produces the overall
-decision (STRONGBUY/STRONGSELL when confluence is strong, otherwise BUY/SELL/FLAT).
+Signals derive from model deltas and indicator heuristics using conservative cutoffs. The
+implementation uses a base threshold in basis points (`BUY_BPS` / `SELL_BPS`, default 15 bps)
+and a larger `STRONG` multiplier (default x5) so STRONGBUY/STRONGSELL are harder to reach.
+
+Timeframe signals map to multipliers (STRONGBUY=+2, BUY=+1, FLAT=0, SELL=-1, STRONGSELL=-2).
+Aggregation (how the overall decision is computed):
+
+- `vote = sum(weight[tf] * multiplier(sig_tf) for tf in available_timeframes)`
+- `total_weight = sum(weights for available_timeframes)`
+- STRONG overall requires a larger fraction of aligned weight: the code now uses 70% of
+  the available weight (instead of 60%) to classify `STRONGBUY`/`STRONGSELL`.
+
+This combination (larger base threshold, higher STRONG multiplier, and a 70% overall
+confluence requirement) reduces how often STRONG* signals appear and favors clearer,
+high-confidence alerts.
 
 ## Files
 
