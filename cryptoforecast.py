@@ -448,11 +448,26 @@ def render_strategy_summary(symbol: str, strategy_name: str, core, strategy_deci
     else:
         reason_txt = str(reason)
 
+    # augment with category and timeframe hint when available
+    cat = STRATEGIES.get(strategy_name, {}).get("category") if 'STRATEGIES' in globals() else None
+    tf_hint = None
+    # try to read a mapping if present (populated later near registration)
+    if 'STRATEGY_TF_HINTS' in globals():
+        tf_hint = STRATEGY_TF_HINTS.get(strategy_name)
+    applies_txt = cat if cat else ""
+    if tf_hint:
+        applies_txt = f"{applies_txt} / {tf_hint}" if applies_txt else tf_hint
+
     # print a strategy block appended under the core summary
     print(divider("-"))
-    print(f"Strategy   : {strategy_name}")
+    if cat:
+        print(f"Strategy   : {strategy_name} ({cat})")
+    else:
+        print(f"Strategy   : {strategy_name}")
     print(f"Underlying : {underlying_overall} (vote={vote})")
     print(f"Decision   : {_color_signal_word(strat_sig)}  Reason: {reason_txt}")
+    if applies_txt:
+        print(f"Applies to : {applies_txt}")
     # optional compact per-strategy detail: show per-tf dpct quick view
     if compact:
         dpct_parts = []
@@ -848,6 +863,31 @@ _register("DCA", "Long-Term", _dca, "Dollar-cost-averaging stub")
 _register("Staking", "Long-Term", _staking, "Staking/yield stub")
 _register("Diversified", "Long-Term", _diversified, "Diversified portfolio stub")
 _register("ValueInvesting", "Long-Term", _value_investing, "Value investing stub")
+
+# Optional human-friendly hint: which timeframe(s) and trading type a strategy typically applies to.
+# This is used by `render_strategy_summary` to show an "Applies to" line for each strategy.
+STRATEGY_TF_HINTS = {
+    "FirstOne": "multi-timeframe (1w/1d/4h/1h/5m)",
+    "Scalping": "5m (Day Trading)",
+    "Breakout": "5m/1h (Day Trading)",
+    "RangeTrading": "1h/5m (Day Trading)",
+    "AI_ML": "1h/5m (Day Trading)",
+    "MultiIndicator": "1h/4h (Day Trading)",
+    "PriceAction": "1h/4h (Day Trading)",
+    "Arbitrage": "cross-exchange (requires orderbooks)",
+
+    "TrendFollowing": "1d/4h (Swing Trading)",
+    "BreakoutMomentumSwing": "1d (Swing Trading)",
+    "SupportResistanceSwing": "1d (Swing Trading)",
+    "SentimentSwing": "1d/4h (Swing Trading)",
+    "IchimokuSwing": "4h/1h (Swing Trading)",
+
+    "HODL": "1w (Long-Term)",
+    "DCA": "1w/1d (Long-Term)",
+    "Staking": "Long-Term (staking)",
+    "Diversified": "Long-Term (portfolio)",
+    "ValueInvesting": "Fundamental / Long-Term",
+}
 
 
 async def run_once(symbol: str, *, compact=False):

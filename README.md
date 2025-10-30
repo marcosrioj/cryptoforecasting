@@ -110,11 +110,13 @@ chmod +x cryptoforecast.sh
 ```
 
 Strategies (categories & quick descriptions)
--------------------------------------------
 The repository registers a set of strategies grouped by category. The script now runs all
 registered strategies by default in a single run: it computes the shared multi-timeframe data
 (1w, 1d, 4h, 1h, 5m) once, prints the main header and timeframe blocks, and then appends each
 strategy's summary block below the timeframes. Some strategies implement heuristics with the
+
+Note: each strategy's printed "Reason" now includes an "Applies to" hint indicating the trading
+category and the main timeframe(s) that strategy targets (for quick human context).
 available kline+indicator data while a few remain placeholders requiring external data (noted below).
 
 Day Trading
