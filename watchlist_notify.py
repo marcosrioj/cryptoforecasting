@@ -170,10 +170,6 @@ async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False, con
             else:
                 # Do not send an alert if overall decision is not strong
                 print(f"[watchlist] {s} overall decision is {overall_from_overall_section}; no alert sent.")
-            if ok:
-                return (s, summary_lines)
-            else:
-                print(f"[watchlist] Failed to send email for {s}")
         return None
 
     tasks = [asyncio.create_task(worker(s)) for s in symbols]
