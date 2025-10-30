@@ -3,4 +3,6 @@
 source .venv/bin/activate
 
 # Run cryptoforecast.py passing all arguments given to this script
-EMAIL_USER=marcosrioj@gmail.com EMAIL_PASS=Trabalho@16 python3 watchlist_notify.py "$@"
+export EMAIL_USER="marcosrioj@gmail.com"
+export EMAIL_PASS="rwwx vduj cdxx xiar"
+python3 watchlist_notify.py "$@"
