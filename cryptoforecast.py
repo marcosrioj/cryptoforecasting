@@ -1,6 +1,6 @@
 # cryptoforecast.py
 #!/usr/bin/env python3
-import asyncio, os, platform, warnings, aiohttp, time, argparse, shutil, sys, logging, contextlib
+import asyncio, os, platform, warnings, aiohttp, time, argparse, shutil, sys, logging, contextlib, io
 import numpy as np, pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List
@@ -552,7 +552,7 @@ def print_compact(symbol, overall, vote, order_tfs, results, dpcts):
     print(divider())
 
 
-def print_core_summary(core, symbol: str, *, compact: bool = False):
+def print_core_summary(core, symbol: str, *, compact: bool = False, overall_override: str = None):
     """Print the main header, underlying overall and timeframe blocks once for the shared core.
 
     This is printed once and then each strategy summary is appended below.
@@ -572,16 +572,19 @@ def print_core_summary(core, symbol: str, *, compact: bool = False):
     # Require a larger fraction of the available weight to be aligned for an
     # overall STRONGBUY / STRONGSELL. Raising this fraction reduces false positives.
     strong_th = total_weight * 0.7
-    if vote >= strong_th:
-        overall = "STRONGBUY"
-    elif vote > 0:
-        overall = "BUY"
-    elif vote <= -strong_th:
-        overall = "STRONGSELL"
-    elif vote < 0:
-        overall = "SELL"
+    if overall_override is not None:
+        overall = overall_override
     else:
-        overall = "FLAT"
+        if vote >= strong_th:
+            overall = "STRONGBUY"
+        elif vote > 0:
+            overall = "BUY"
+        elif vote <= -strong_th:
+            overall = "STRONGSELL"
+        elif vote < 0:
+            overall = "SELL"
+        else:
+            overall = "FLAT"
 
     if compact:
         print_compact(symbol, overall, vote, ORDERED_TF, results, dpcts_tmp)
@@ -1141,18 +1144,75 @@ async def run_once(symbol: str, *, compact=False):
     # run core forecast once and share results to all strategies
     core = await _core_forecast(symbol)
 
-    # Clear and print the main core summary (timeframes) once
-    clear_console()
-    print_core_summary(core, symbol, compact=compact)
-
-    # Run each registered strategy and append its summary block below the timeframes
+    # Run each registered strategy in a capture mode to collect their decisions
+    # (without printing). Then compute an overall decision from the strategies
+    # and render the core summary once with that overall, followed by each
+    # strategy's printed block (using the captured decisions where possible).
+    strategy_results = []
     for name, meta in STRATEGIES.items():
         fn = meta.get("fn")
         try:
-            await fn(symbol, core=core, compact=compact)
-        except TypeError:
-            # fallback if strategy signature older
-            await fn(symbol)
+            # suppress prints while collecting the return value
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    res = await fn(symbol, core=core, compact=compact)
+                except TypeError:
+                    res = await fn(symbol)
+        except Exception:
+            res = None
+        # Expecting strategy functions to return a dict from render_strategy_summary
+        if isinstance(res, dict):
+            strategy_results.append(res)
+        else:
+            # If the strategy didn't return a dict, record a placeholder so we
+            # will render it normally later
+            strategy_results.append({"name": name, "signal": None, "reason": None, "fn": fn})
+
+    # Aggregate strategy-level votes to form an overall strategy decision
+    strat_vote = 0
+    n_strats = len(strategy_results) or 1
+    for r in strategy_results:
+        sig = r.get("signal") or r.get("sig")
+        if sig:
+            strat_vote += signal_to_multiplier(sig)
+    max_strat_weight = 2 * n_strats
+    strat_strong_th = max_strat_weight * 0.7
+    if strat_vote >= strat_strong_th:
+        overall_strat = "STRONGBUY"
+    elif strat_vote > 0:
+        overall_strat = "BUY"
+    elif strat_vote <= -strat_strong_th:
+        overall_strat = "STRONGSELL"
+    elif strat_vote < 0:
+        overall_strat = "SELL"
+    else:
+        overall_strat = "FLAT"
+
+    # Clear and print the main core summary (timeframes) once, using strategy-based overall
+    clear_console()
+    print_core_summary(core, symbol, compact=compact, overall_override=overall_strat)
+
+    # Render each strategy block: prefer the captured decision dict; if missing,
+    # call the original function so it prints its block.
+    for r in strategy_results:
+        if r.get("signal") is not None:
+            # use the rendered info to print a strategy block
+            render_strategy_summary(symbol, r.get("name"), core, {"sig": r.get("signal"), "reason": r.get("reason")}, compact=compact)
+        else:
+            # fallback: call the original function so it prints its block
+            fn = r.get("fn")
+            try:
+                await fn(symbol, core=core, compact=compact)
+            except Exception:
+                try:
+                    await fn(symbol)
+                except Exception:
+                    # last-resort: print a minimal placeholder
+                    print(divider("-"))
+                    print(f"Strategy   : {r.get('name')}")
+                    print("Decision   : N/A  Reason: error while computing strategy")
+                    print(divider())
 
 # --------- Scheduler / CLI ---------
 async def scheduler_loop(loop: bool, every: int, symbol: str, *, compact=False):
