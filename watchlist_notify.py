@@ -107,8 +107,9 @@ async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False, con
             return None
 
         overall = parse_overall_from_summary(summary_lines)
-        if overall == "STRONGBUY":
-            title = f"CRYPTOFORECAST ALERT: STRONGBUY {s} @ {now_utc.isoformat()}"
+        # Trigger on strong signals in either direction
+        if overall in ("STRONGBUY", "STRONGSELL"):
+            title = f"CRYPTOFORECAST ALERT: {overall} {s} @ {now_utc.isoformat()}"
             body = title + "\n\n" + "\n".join(summary_lines)
             try:
                 tf_lines = []
