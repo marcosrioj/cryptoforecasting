@@ -44,7 +44,7 @@ BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET")
 BYBIT_TESTNET = os.environ.get("BYBIT_TESTNET") in ("1", "true", "True")
 TRADE_USDT = float(os.environ.get("TRADE_USDT") or 10.0)
 LEVERAGE = int(os.environ.get("TRADE_LEVERAGE") or 10)
-CATEGORY = os.environ.get("BYBIT_CATEGORY") or "linear"
+CATEGORY = "linear"  # restrict to USDT perpetual (linear) markets only
 
 API_HOST = "https://api-testnet.bybit.com" if BYBIT_TESTNET else "https://api.bybit.com"
 
@@ -85,6 +85,34 @@ def normalize_symbol(s: str) -> str:
     if len(s) <= 5 and s.isalpha() and not s.endswith("USDT"):
         return s + "USDT"
     return s
+
+
+async def fetch_current_price_public(session: aiohttp.ClientSession, symbol: str) -> Optional[float]:
+    """Fetch the current mid/last price from Bybit public API (v2 public tickers fallback).
+
+    Returns a float price or None on failure.
+    """
+    try:
+        url = API_HOST + "/v2/public/tickers"
+        async with session.get(url, params={"symbol": symbol}, timeout=10) as resp:
+            data = await resp.json()
+        # v2 response: {ret_code:0, result: [ { 'last_price': '0.123', ... } ] }
+        if isinstance(data, dict):
+            # common locations
+            if data.get("ret_code") == 0 and data.get("result"):
+                r0 = data.get("result")[0]
+                val = r0.get("last_price") or r0.get("lastPrice") or r0.get("last")
+                if val is not None:
+                    return float(val)
+            # some endpoints return 'data' list
+            if data.get("data"):
+                r0 = data.get("data")[0]
+                val = r0.get("last_price") or r0.get("lastPrice") or r0.get("last")
+                if val is not None:
+                    return float(val)
+    except Exception:
+        return None
+    return None
 
 # Helpers: Bybit v5 signing (simple HMAC SHA256)
 # Bybit v5 signature pattern: signature = HMAC_SHA256(secret, timestamp + method + requestPath + (body or ""))
@@ -261,13 +289,17 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
     # take profit delta is 90% of avg_dpct
     tp_pct = avg_dpct * 0.9
 
-    # fetch current mid/last price from results: pick highest-weight available TF
+    # fetch current mid/last price from Bybit public API to ensure live market price
     price = None
-    for tf in sorted(cf.WEIGHTS.keys(), key=lambda k: -cf.WEIGHTS[k]):
-        r = results.get(tf)
-        if r:
-            price = r.get("last")
-            break
+    async with aiohttp.ClientSession() as sess:
+        price = await fetch_current_price_public(sess, symbol)
+    # fallback to core results if public price unavailable
+    if price is None:
+        for tf in sorted(cf.WEIGHTS.keys(), key=lambda k: -cf.WEIGHTS[k]):
+            r = results.get(tf)
+            if r:
+                price = r.get("last")
+                break
     if price is None:
         print("[autotrade] Could not determine market price from core; aborting")
         return
