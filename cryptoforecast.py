@@ -435,10 +435,9 @@ def render_strategy_summary(symbol: str, strategy_name: str, core, strategy_deci
     """
     results, dpcts_tmp, duration, now_utc, summary_lines = core
 
-    # compute underlying overall (from core results) for context
+    # compute vote for context (kept for logs) but we don't surface it as 'Underlying' here
     vote = sum((WEIGHTS.get(tf,1) if r["sig"]=="BUY" else -WEIGHTS.get(tf,1) if r["sig"]=="SELL" else 0)
                for tf,r in results.items())
-    underlying_overall = "BUY" if vote>0 else "SELL" if vote<0 else "FLAT"
 
     # Strategy decision
     strat_sig = strategy_decision.get("sig", "FLAT")
@@ -464,7 +463,6 @@ def render_strategy_summary(symbol: str, strategy_name: str, core, strategy_deci
         print(f"Strategy   : {strategy_name} ({cat})")
     else:
         print(f"Strategy   : {strategy_name}")
-    print(f"Underlying : {underlying_overall} (vote={vote})")
     print(f"Decision   : {_color_signal_word(strat_sig)}  Reason: {reason_txt}")
     if applies_txt:
         print(f"Applies to : {applies_txt}")
