@@ -142,20 +142,36 @@ def format_like(last_str: str, value: float) -> str:
 async def fetch_kline(session, interval_code: str, limit: int, symbol: str) -> pd.DataFrame:
     url = "https://api.bybit.com/v5/market/kline"
     params = {"category": CATEGORY, "symbol": symbol, "interval": interval_code, "limit": limit}
-    async with session.get(url, params=params, timeout=30) as resp:
-        data = await resp.json()
-        rows = data.get("result", {}).get("list", [])
-        if not rows:
-            return pd.DataFrame()
-        # Build as strings first, keep original 'close' text
-        df = pd.DataFrame(rows, columns=["start","open","high","low","close","volume","turnover"])
-        df["close_str"] = df["close"].astype(str)
-        # Now convert numerics
-        df["ts"] = pd.to_datetime(df["start"].astype("int64"), unit="ms", utc=True).dt.tz_convert(None)
-        for c in ["open","high","low","close","volume","turnover"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        df = df.dropna().sort_values("ts").reset_index(drop=True)
-        return df[["ts","open","high","low","close","volume","turnover","close_str"]]
+    # Retry logic for network robustness: initial attempt + 3 retries (4 attempts total)
+    max_attempts = 4
+    attempt = 0
+    backoff = 1
+    while True:
+        attempt += 1
+        try:
+            async with session.get(url, params=params, timeout=30) as resp:
+                data = await resp.json()
+                rows = data.get("result", {}).get("list", [])
+                if not rows:
+                    return pd.DataFrame()
+                # Build as strings first, keep original 'close' text
+                df = pd.DataFrame(rows, columns=["start","open","high","low","close","volume","turnover"])
+                df["close_str"] = df["close"].astype(str)
+                # Now convert numerics
+                df["ts"] = pd.to_datetime(df["start"].astype("int64"), unit="ms", utc=True).dt.tz_convert(None)
+                for c in ["open","high","low","close","volume","turnover"]:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                df = df.dropna().sort_values("ts").reset_index(drop=True)
+                return df[["ts","open","high","low","close","volume","turnover","close_str"]]
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            if attempt >= max_attempts:
+                # Give up and return empty DataFrame so caller will skip this TF and
+                # the run finishes; the next scheduled run will try again.
+                return pd.DataFrame()
+            # exponential backoff before retrying
+            await asyncio.sleep(backoff)
+            backoff *= 2
+            continue
 
 async def fetch_all_tf(symbol: str) -> Dict[str, pd.DataFrame]:
     async with aiohttp.ClientSession() as s:

@@ -24,6 +24,7 @@ from email.message import EmailMessage
 # OAuth2 support removed for simpler SMTP-only operation
 import argparse
 import traceback
+import aiohttp
 import warnings
 import io
 import contextlib
@@ -103,9 +104,31 @@ async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False, con
     async def worker(s):
         try:
             async with sem:
-                results, dpcts_tmp, duration, now_utc, summary_lines = await cf._core_forecast(s)
+                # Retry logic: initial attempt + up to 3 retries on network-related errors
+                max_attempts = 4
+                attempt = 0
+                while True:
+                    attempt += 1
+                    try:
+                        results, dpcts_tmp, duration, now_utc, summary_lines = await cf._core_forecast(s)
+                        break
+                    except Exception as e:
+                        # Only retry on network/IO/timeout related exceptions
+                        is_network = isinstance(e, (aiohttp.ClientError, asyncio.TimeoutError, OSError))
+                        if not is_network:
+                            # Non-network error: report and skip this symbol
+                            print(f"[watchlist] Error checking {s}: {e}")
+                            return None
+                        if attempt >= max_attempts:
+                            print(f"[watchlist] Network failure for {s} after {attempt} attempts; skipping until next run")
+                            return None
+                        # Compact retry message and exponential backoff
+                        backoff = 2 ** (attempt - 1)
+                        print(f"[watchlist] Network error for {s} (attempt {attempt}/{max_attempts}), retrying in {backoff}s")
+                        await asyncio.sleep(backoff)
+                # end while
         except Exception as e:
-            # Compact error reporting only
+            # Fallback compact reporting
             print(f"[watchlist] Error checking {s}: {e}")
             return None
 
