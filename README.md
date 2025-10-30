@@ -364,6 +364,64 @@ Advanced: use `--symbols` to pass a custom comma-separated list, or `WATCHLIST` 
 Security note: Do not commit `EMAIL_PASS` to version control. Prefer process managers or secret
 stores to inject credentials. Gmail app passwords are recommended for SMTP.
 
+
+Autotrade (Bybit futures)
+-------------------------
+A new helper script `autotrade_bybit.py` can run `cryptoforecast.FirstOne` and manage a single
+Bybit USDT perpetual position for a given symbol on a 5‑minute schedule (aligned to 0:00,
+0:05, 0:10 ...). Behavior:
+
+- If any previous open futures position exists for the symbol, the script will close it by
+  submitting a market reduce-only order before opening a new position.
+- If `FirstOne` reports `BUY` or `STRONGBUY`, the script opens a LONG position (10x leverage by
+  default). If the signal is `SELL` or `STRONGSELL`, it opens a SHORT position (10x).
+- Take profit is calculated as 90% of the weighted predicted Δ% across timeframes (i.e. 10%
+  less than the predicted Δ%). Stop loss is set to a 25% adverse move from entry.
+
+Configuration (environment variables):
+
+- `BYBIT_API_KEY` — Bybit API key (required for live trading)
+- `BYBIT_API_SECRET` — Bybit API secret (required for live trading)
+- `BYBIT_TESTNET` — set to `1` to use Bybit testnet (recommended for testing)
+- `TRADE_USDT` — notional USDT amount per trade (default: `10`)
+- `TRADE_LEVERAGE` — leverage to use (default: `10`)
+- `BYBIT_CATEGORY` — Bybit category (`linear` is default; set if using another product)
+
+Usage examples
+
+Dry-run single cycle (recommended for testing):
+
+```bash
+python3 autotrade_bybit.py --symbol BTC --dry-run --once
+```
+
+This will normalize `BTC` → `BTCUSDT`, run `FirstOne` and print the actions it would take
+without placing any orders.
+
+Testnet dry-run (no real money):
+
+```bash
+export BYBIT_TESTNET=1
+export BYBIT_API_KEY="<your_test_api_key>"
+export BYBIT_API_SECRET="<your_test_api_secret>"
+python3 autotrade_bybit.py --symbol BTCUSDT --dry-run --once
+```
+
+Live mode (only after extensive testing): remove `--dry-run` to enable real orders. The
+script aligns to 5-minute boundaries automatically; to run once and exit use `--once`.
+
+Important safety notes
+
+- TP/SL semantics vary by Bybit account and market type. The script attempts to attach
+  `takeProfit`/`stopLoss` to the order via the v5 API. If your account requires separate
+  conditional orders for TP/SL, let me know and I will modify the script to create
+  conditional OCO-style orders after opening the market position.
+- Quantity calculation is a simple notional approximation: `qty = (TRADE_USDT * LEVERAGE) / price`.
+  Adjust sizing logic if you prefer margin-based sizing or percent-of-balance sizing.
+- Always test on testnet and with `--dry-run` before enabling live trading. The author is not
+  responsible for trading losses.
+
+
 If you want to run only a subset of strategies or reintroduce CLI selection, it's possible to
 add a convenience flag (e.g. `--list-strategies` or `--strategy`) — tell me if you'd like that
 added back in and I'll implement it.
