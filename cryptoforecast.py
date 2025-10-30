@@ -1,6 +1,6 @@
 # cryptoforecast.py
 #!/usr/bin/env python3
-import asyncio, os, platform, warnings, aiohttp, time, argparse, shutil
+import asyncio, os, platform, warnings, aiohttp, time, argparse, shutil, sys
 import numpy as np, pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List
@@ -707,8 +707,92 @@ def parse_args():
     p.add_argument("--no-icons", action="store_true", help="Disable icons/emojis")
     return p.parse_args()
 
+
+def _ask(prompt: str, default=None, options: List[str]=None) -> str:
+    """Ask the user for a value showing options and default. Returns a string or default when empty."""
+    opt_txt = f" Options: {', '.join(options)}." if options else ""
+    default_txt = f" (default: {default})" if default is not None else ""
+    try:
+        val = input(f"{prompt}{opt_txt}{default_txt}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("")
+        return default
+    if val == "":
+        return default
+    return val
+
+
+def _ask_bool(prompt: str, default: bool) -> bool:
+    dchar = "Y/n" if default else "y/N"
+    try:
+        val = input(f"{prompt} [{dchar}] (default: {default}): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("")
+        return default
+    if val == "":
+        return default
+    if val in ("y","yes","1","true","t"): return True
+    if val in ("n","no","0","false","f"): return False
+    return default
+
+
+def interactive_fill_args(args: argparse.Namespace) -> argparse.Namespace:
+    """If run interactively (no CLI args), prompt the user for parameters showing options and defaults.
+
+    This only triggers when stdin is a TTY. For non-interactive use (cron), it leaves args unchanged.
+    """
+    if not sys.stdin.isatty():
+        return args
+    # Only prompt when the user ran the script without CLI args
+    if len(sys.argv) > 1:
+        return args
+
+    print("Interactive mode — configure runtime parameters. Press Enter to accept the default shown.")
+    # Symbol
+    args.symbol = _ask("Symbol (e.g. BTCUSDT)", default=args.symbol).upper()
+
+    # Loop (boolean)
+    args.loop = _ask_bool("Run continuously (loop)?", default=args.loop)
+
+    # Every (int)
+    every_val = _ask("Seconds between runs when --loop (integer)", default=str(args.every))
+    try:
+        args.every = int(every_val)
+    except Exception:
+        args.every = args.every
+
+    # Bybit category
+    cat_opts = ["linear","inverse","spot"]
+    args.category = _ask("Bybit category", default=args.category, options=cat_opts)
+
+    # Compact
+    args.compact = _ask_bool("Compact summary mode?", default=args.compact)
+
+    # Colors / icons
+    args.no_color = not _ask_bool("Enable ANSI colors?", default=not args.no_color)
+    args.no_icons = not _ask_bool("Enable icons/emojis?", default=not args.no_icons)
+
+    # Strategy selection
+    try:
+        available = sorted(STRATEGIES.keys())
+    except Exception:
+        available = []
+    if available:
+        print(f"Available strategies: {', '.join(available)}")
+        s = _ask("Strategy name (leave blank to run default FirstOne)", default=args.strategy)
+        args.strategy = s if s else None
+        if not args.strategy:
+            # ask category of strategies
+            cats = sorted(set(meta["category"] for meta in STRATEGIES.values()))
+            print(f"Available strategy categories: {', '.join(cats)}")
+            sc = _ask("Strategy category to run (leave blank for none)", default=args.strategy_category, options=cats)
+            args.strategy_category = sc if sc else None
+
+    return args
+
 if __name__ == "__main__":
     args = parse_args()
+    args = interactive_fill_args(args)
     SYMBOL = args.symbol.upper()
     CATEGORY = args.category
     _set_color(not args.no_color)

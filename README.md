@@ -72,6 +72,35 @@ Other flags
  - `--strategy` : run a named strategy (see Strategies below)
  - `--strategy-category` : run all strategies in a category (Day Trading, Swing Trading, Long-Term)
 
+Interactive configuration
+-------------------------
+When you run the script without any CLI arguments (and from a TTY), the script now opens an
+interactive prompt and asks for the main runtime parameters. This is convenient for quick
+exploration or when you prefer not to type flags. Behavior:
+
+- Prompts for: symbol, loop (yes/no), `--every` (seconds), Bybit category, compact mode, colors/icons,
+  and strategy/strategy-category selection.
+- Each prompt shows valid options (when relevant) and the default value; press Enter to accept the default.
+- The interactive prompt only triggers when stdin is a TTY and no CLI args were provided. Running with
+  any flags (or from a non-interactive environment) keeps the previous, non-interactive behavior.
+
+Example interactive run
+```text
+$ python3 cryptoforecast.py
+Interactive mode — configure runtime parameters. Press Enter to accept the default shown.
+Symbol (e.g. BTCUSDT) (default: BTCUSDT): ETHUSDT
+Run continuously (loop)? [y/N] (default: False): y
+Seconds between runs when --loop (integer) (default: 300): 60
+Bybit category. Options: linear, inverse, spot. (default: linear): spot
+Compact summary mode? [y/N] (default: False):
+Enable ANSI colors? [Y/n] (default: True): y
+Enable icons/emojis? [Y/n] (default: True): n
+Available strategies: FirstOne, Scalping, Breakout, RangeTrading, AI_ML, MultiIndicator, PriceAction, Arbitrage, TrendFollowing, BreakoutMomentumSwing, SupportResistanceSwing, SentimentSwing, IchimokuSwing, HODL, DCA, Staking, Diversified, ValueInvesting
+Strategy name (leave blank to run default FirstOne) (default: None): Scalping
+
+-- now the script runs according to the choices you entered --
+```
+
 Shell helper (optional)
 -----------------------
 `cryptoforecast.sh` can be a small wrapper:
