@@ -165,6 +165,67 @@ async def place_market_order(session: aiohttp.ClientSession, symbol: str, side: 
     except Exception:
         return {"ret_msg": txt}
 
+
+def _divider(char="-"):
+    return char * 60
+
+
+def _format_pos(p: dict) -> str:
+    # Defensive extraction of common Bybit v5 position fields
+    sym = p.get("symbol") or p.get("instId") or "N/A"
+    side = p.get("side") or p.get("positionSide") or "N/A"
+    size = p.get("size") or p.get("qty") or 0
+    entry = p.get("entryPrice") or p.get("avgEntryPrice") or p.get("price") or "N/A"
+    tp = p.get("takeProfit") or p.get("tp") or "N/A"
+    sl = p.get("stopLoss") or p.get("sl") or "N/A"
+    liq = p.get("liqPrice") or p.get("liq_price") or "N/A"
+    upl = p.get("unrealisedPnl") or p.get("unrealizedPnl") or p.get("floatProfit") or "N/A"
+    lev = p.get("leverage") or p.get("leverageRate") or "N/A"
+    return f"{sym} | side={side} size={size} entry={entry} TP={tp} SL={sl} LIQ={liq} UPL={upl} LEV={lev}"
+
+
+async def fetch_positions_list(session: aiohttp.ClientSession, symbol: str):
+    try:
+        resp = await get_positions(session, symbol)
+    except Exception as e:
+        print(f"[autotrade] Failed to fetch positions: {e}")
+        return []
+    pos_list = []
+    try:
+        if isinstance(resp, dict) and resp.get("ret_code") == 0:
+            pos_list = resp.get("result", {}).get("list", [])
+        elif isinstance(resp, dict) and resp.get("result"):
+            pos_list = resp.get("result", {}).get("list", [])
+        elif isinstance(resp, dict) and resp.get("data"):
+            # other shapes
+            pos_list = resp.get("data", [])
+    except Exception:
+        pos_list = []
+    return pos_list
+
+
+def print_trade_summary(symbol: str, signal: str, side: str, qty: float, entry_price: float, tp_price: float, sl_price: float, executed_resp: dict, pos_list: list, dry_run: bool):
+    print(_divider("="))
+    print(f"AUTOTRADE SUMMARY for {symbol} — {datetime.now(timezone.utc).isoformat()}")
+    print(_divider("="))
+    print(f"Signal     : {signal}")
+    print(f"Planned side: {side}  Qty: {qty:.6f}")
+    print(f"Entry price : {entry_price}")
+    print(f"Take Profit : {tp_price}")
+    print(f"Stop Loss   : {sl_price}")
+    print(f"Mode        : {'DRY-RUN' if dry_run else 'LIVE'}")
+    print(_divider())
+    print("Order result / response:")
+    print(json.dumps(executed_resp or {}, indent=2))
+    print(_divider())
+    print("Active positions:")
+    if not pos_list:
+        print("  (no active positions returned)")
+    else:
+        for p in pos_list:
+            print("  " + _format_pos(p))
+    print(_divider("="))
+
 # Helper to compute weighted avg dpct from cryptoforecast dpcts_tmp (percent values)
 def weighted_dpct(dpcts: dict) -> float:
     total_w = 0
@@ -235,12 +296,42 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
     # round qty to a reasonable precision (6 decimal places)
     qty = float(f"{qty:.6f}")
 
+    # Ensure we're operating on a USDT perpetual (linear) market
+    if not symbol.upper().endswith("USDT") or CATEGORY != "linear":
+        print(f"[autotrade] Aborting: autotrade is configured for USDT perpetuals (linear). symbol={symbol} CATEGORY={CATEGORY}")
+        return
+
+    # Sanity check: if TP would not be beyond current price (no room for profit), skip order
+    if side == "Buy" and tp_price <= price:
+        print(f"[autotrade] Skipping order: computed TP ({tp_price:.8f}) <= current price ({price:.8f}) — no upside")
+        # show summary/context
+        pos_list = []
+        if BYBIT_API_KEY and BYBIT_API_SECRET:
+            async with aiohttp.ClientSession() as sess:
+                pos_list = await fetch_positions_list(sess, symbol)
+        print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=dry_run)
+        return
+    if side == "Sell" and tp_price >= price:
+        print(f"[autotrade] Skipping order: computed TP ({tp_price:.8f}) >= current price ({price:.8f}) — no downside")
+        pos_list = []
+        if BYBIT_API_KEY and BYBIT_API_SECRET:
+            async with aiohttp.ClientSession() as sess:
+                pos_list = await fetch_positions_list(sess, symbol)
+        print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=dry_run)
+        return
+
     # If dry-run, just print the actions
     if dry_run:
         print(f"[autotrade][DRY] Would set leverage={LEVERAGE} for {symbol}")
         print(f"[autotrade][DRY] Would close any existing position for {symbol} by market")
         print(f"[autotrade][DRY] Would open {side} {qty} {symbol} (notional {TRADE_USDT} USDT at x{LEVERAGE})")
         print(f"[autotrade][DRY] TP={tp_price:.8f} SL={sl_price:.8f} (tp_pct={tp_pct:.4f}%)")
+        # If API keys are present we can still list current active positions for context
+        pos_list = []
+        if BYBIT_API_KEY and BYBIT_API_SECRET:
+            async with aiohttp.ClientSession() as sess:
+                pos_list = await fetch_positions_list(sess, symbol)
+        print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True)
         return
 
     # Live mode: perform API calls
@@ -280,6 +371,9 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         # 3) place market order to open position
         open_res = await place_market_order(sess, symbol, side, qty=qty, reduce_only=False, take_profit=tp_price, stop_loss=sl_price)
         print(f"[autotrade] Open order response: {open_res}")
+    # after placing order, fetch current positions and print a UX summary
+    pos_list_after = await fetch_positions_list(sess, symbol)
+    print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=open_res, pos_list=pos_list_after, dry_run=False)
 
 # Scheduler: align to 5-minute boundaries and run forever (or once)
 async def scheduler(symbol: str, dry_run: bool = True, once: bool = False):
