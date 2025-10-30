@@ -646,15 +646,43 @@ async def _core_forecast(symbol: str):
     """
     start_time = time.perf_counter()
 
+    # Progress helper: print a simple 0-100% progress bar when stdout is a TTY.
+    def _progress_print(pct: int, msg: str = ""):
+        try:
+            import sys
+            if not sys.stdout.isatty():
+                return
+            w = max(20, min(60, term_width() - 30))
+            filled = int(w * max(0, min(100, pct)) / 100)
+            bar = "█" * filled + "-" * (w - filled)
+            # carriage return to overwrite the same line
+            print(f"\rProgress: [{bar}] {pct:3d}% {msg}", end="", flush=True)
+        except Exception:
+            # If anything goes wrong with progress printing, ignore it.
+            pass
+
+    # Start at 0
+    _progress_print(0, "starting")
+
     raw = await fetch_all_tf(symbol)
+    _progress_print(20, "fetched kline data")
     results = {}
     dpcts_tmp = {}
+    total_tfs = max(1, len(TIMEFRAMES))
+    processed = 0
     for tf, data in raw.items():
         if isinstance(data, Exception) or not isinstance(data, pd.DataFrame) or data.empty:
+            processed += 1
+            # update progress even when skipping
+            pct = 20 + int((processed / total_tfs) * 75)
+            _progress_print(pct, f"processing {tf} (skipped)")
             continue
         code = TIMEFRAMES[tf]
         data = trim_to_last_closed(data, code)
         if len(data) < MIN_ROWS_TF.get(tf, 200):
+            processed += 1
+            pct = 20 + int((processed / total_tfs) * 75)
+            _progress_print(pct, f"processing {tf} (not enough rows)")
             continue
         feat = make_features(data)
         if feat.empty: continue
@@ -710,6 +738,9 @@ async def _core_forecast(symbol: str):
             "ai": {"A": ai_A, "B": ai_B, "C": ai_C, "ENS": ai_ens, "agree": ai_agree, "overlay": overlay_applied},
             "ai_deltas": ai_deltas
         }
+        processed += 1
+        pct = 20 + int((processed / total_tfs) * 75)
+        _progress_print(pct, f"processed {tf}")
     # vote & overall using 5-level signals
     vote = 0
     for tf, r in results.items():
@@ -730,6 +761,15 @@ async def _core_forecast(symbol: str):
         overall = "FLAT"
 
     duration = time.perf_counter() - start_time
+
+    # Done — print 100% and move to next line before summary output
+    _progress_print(100, "done")
+    try:
+        import sys
+        if sys.stdout.isatty():
+            print("")
+    except Exception:
+        pass
 
     # ---------- SUMMARY INFO ----------
     now_utc = datetime.now(timezone.utc); now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
