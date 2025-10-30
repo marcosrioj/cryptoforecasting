@@ -142,9 +142,34 @@ async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False, con
             ansi_re = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
             formatted = ansi_re.sub("", raw_formatted)
 
-            body = title + "\n\n" + formatted
+            # Prefer the Decision printed in the [OVERALL] block. Parse it from the
+            # captured formatted output to ensure we only alert on overall STRONG signals.
+            overall_from_overall_section = None
+            try:
+                idx = formatted.find("[OVERALL]")
+                if idx != -1:
+                    snippet = formatted[idx: idx + 1000]
+                    m = re.search(r"Decision\s*:\s*([A-Z]+)", snippet)
+                    if m:
+                        overall_from_overall_section = m.group(1)
+            except Exception:
+                overall_from_overall_section = None
 
-            ok = send_email(title, body, email_to, smtp_user, smtp_pass)
+            # If we couldn't parse the OVERALL block, fall back to the summary_lines parse
+            if overall_from_overall_section is None:
+                overall_from_overall_section = overall
+
+            # Only send mail when the OVERALL decision is STRONGBUY or STRONGSELL
+            if overall_from_overall_section in ("STRONGBUY", "STRONGSELL"):
+                body = title + "\n\n" + formatted
+                ok = send_email(title, body, email_to, smtp_user, smtp_pass)
+                if ok:
+                    return (s, summary_lines)
+                else:
+                    print(f"[watchlist] Failed to send email for {s}")
+            else:
+                # Do not send an alert if overall decision is not strong
+                print(f"[watchlist] {s} overall decision is {overall_from_overall_section}; no alert sent.")
             if ok:
                 return (s, summary_lines)
             else:
