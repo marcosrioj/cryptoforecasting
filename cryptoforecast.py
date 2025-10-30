@@ -1,6 +1,6 @@
 # cryptoforecast.py
 #!/usr/bin/env python3
-import asyncio, os, platform, warnings, aiohttp, time, argparse, shutil, sys
+import asyncio, os, platform, warnings, aiohttp, time, argparse, shutil, sys, logging, contextlib
 import numpy as np, pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List
@@ -664,7 +664,20 @@ async def _core_forecast(symbol: str):
     # Start at 0
     _progress_print(0, "starting")
 
-    raw = await fetch_all_tf(symbol)
+    # Silence stderr and third-party logging during network fetches and heavy
+    # computation so only the progress bar is visible. We still write the
+    # progress bar to stdout above.
+    devnull = os.devnull
+    prev_log_level = logging.getLogger().level
+    try:
+        with open(devnull, "w") as dn, contextlib.redirect_stderr(dn):
+            logging.getLogger().setLevel(logging.CRITICAL)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                raw = await fetch_all_tf(symbol)
+    finally:
+        logging.getLogger().setLevel(prev_log_level)
+
     _progress_print(20, "fetched kline data")
     results = {}
     dpcts_tmp = {}
