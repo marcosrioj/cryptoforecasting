@@ -25,6 +25,9 @@ from email.message import EmailMessage
 import argparse
 import traceback
 import warnings
+import io
+import contextlib
+import re
 
 import cryptoforecast as cf
 
@@ -110,18 +113,36 @@ async def check_once(symbols, smtp_user, smtp_pass, email_to, compact=False, con
         # Trigger on strong signals in either direction
         if overall in ("STRONGBUY", "STRONGSELL"):
             title = f"CRYPTOFORECAST ALERT: {overall} {s} @ {now_utc.isoformat()}"
-            body = title + "\n\n" + "\n".join(summary_lines)
+
+            # Capture the human-friendly output from cryptoforecast's printing routines
+            # (print_core_summary + each registered strategy) into a string and include
+            # it in the email body. We strip ANSI escape sequences so the email body is
+            # readable in plain-text clients.
+            buf = io.StringIO()
             try:
-                tf_lines = []
-                for tf in cf.ORDERED_TF:
-                    r = results.get(tf)
-                    if not r:
-                        continue
-                    tf_lines.append(f"[{tf}] last={r['last_str']} pred={r['pred']:.6f} sig={r['sig']}")
-                if tf_lines:
-                    body += "\n\nPer-timeframe quick: \n" + "\n".join(tf_lines)
-            except Exception:
-                pass
+                with contextlib.redirect_stdout(buf):
+                    # Print the shared core summary (timeframes, overall)
+                    cf.print_core_summary((results, dpcts_tmp, duration, now_utc, summary_lines), s, compact=compact)
+                    # Run each registered strategy to allow them to append their blocks
+                    for name, meta in getattr(cf, "STRATEGIES", {}).items():
+                        fn = meta.get("fn")
+                        try:
+                            # most strategy functions accept (symbol, core=..., compact=...)
+                            await fn(s, core=(results, dpcts_tmp, duration, now_utc, summary_lines), compact=compact)
+                        except TypeError:
+                            # fallback to older signature
+                            await fn(s)
+            except Exception as e:
+                # If anything fails during rendering, fall back to the plain summary lines
+                buf = io.StringIO()
+                buf.write("".join([l + "\n" for l in summary_lines]))
+
+            raw_formatted = buf.getvalue()
+            # remove ANSI escape sequences (colors) for email readability
+            ansi_re = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+            formatted = ansi_re.sub("", raw_formatted)
+
+            body = title + "\n\n" + formatted
 
             ok = send_email(title, body, email_to, smtp_user, smtp_pass)
             if ok:
