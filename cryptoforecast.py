@@ -192,7 +192,7 @@ def ts_cv_metrics(X, y):
     tscv = TimeSeriesSplit(n_splits=3)
     mape_scores, dir_hits, dir_total = [], 0, 0
     for tr, te in tscv.split(X):
-        m = lgb.LGBMRegressor(n_estimators=400, learning_rate=0.03, objective="mape", random_state=SEED)
+        m = lgb.LGBMRegressor(n_estimators=400, learning_rate=0.03, objective="mape", random_state=SEED, verbosity=-1)
         m.fit(X.iloc[tr], y.iloc[tr])
         yhat = m.predict(X.iloc[te])
         mape_scores.append(mean_absolute_percentage_error(y.iloc[te], yhat))
@@ -206,10 +206,10 @@ def fit_predict_ensemble(df_feat, last_close):
     y_close = df_feat["y_next_close"]; y_ret = df_feat["y_next_ret_pct"]
     cv_mape, dir_acc = ts_cv_metrics(X, y_close)
 
-    mdl_a = lgb.LGBMRegressor(n_estimators=800, learning_rate=0.03, objective="mape", random_state=SEED)
+    mdl_a = lgb.LGBMRegressor(n_estimators=800, learning_rate=0.03, objective="mape", random_state=SEED, verbosity=-1)
     mdl_a.fit(X, y_close); pred_a = float(mdl_a.predict(X.tail(1))[0])
 
-    mdl_b = lgb.LGBMRegressor(n_estimators=600, learning_rate=0.03, random_state=SEED)
+    mdl_b = lgb.LGBMRegressor(n_estimators=600, learning_rate=0.03, random_state=SEED, verbosity=-1)
     mdl_b.fit(X, y_ret);   pred_b_ret = float(mdl_b.predict(X.tail(1))[0])
     pred_b = last_close * (1.0 + pred_b_ret / 100.0)
 
@@ -679,6 +679,7 @@ async def _core_forecast(symbol: str):
         logging.getLogger().setLevel(prev_log_level)
 
     _progress_print(20, "fetched kline data")
+
     results = {}
     dpcts_tmp = {}
     total_tfs = max(1, len(TIMEFRAMES))
@@ -698,7 +699,11 @@ async def _core_forecast(symbol: str):
             _progress_print(pct, f"processing {tf} (not enough rows)")
             continue
         feat = make_features(data)
-        if feat.empty: continue
+        if feat.empty:
+            processed += 1
+            pct = 20 + int((processed / total_tfs) * 75)
+            _progress_print(pct, f"processing {tf} (no features)")
+            continue
 
         last = float(data["close"].iloc[-1])
         last_str = str(data["close_str"].iloc[-1])
@@ -754,6 +759,7 @@ async def _core_forecast(symbol: str):
         processed += 1
         pct = 20 + int((processed / total_tfs) * 75)
         _progress_print(pct, f"processed {tf}")
+
     # vote & overall using 5-level signals
     vote = 0
     for tf, r in results.items():

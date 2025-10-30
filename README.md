@@ -15,6 +15,9 @@ signal system, the strategy registry, and the SMTP-only watchlist notifier.
   strategies by default.
 - Rendering: prints the overall and timeframe blocks (1w, 1d, 4h, 1h, 5m) once, then appends a
   standardized per-strategy block (Strategy, Decision, Reason, Applies to).
+- Progress: when run in a terminal the script shows a 0→100% TTY-only progress bar while it
+  fetches data and computes models; library warnings (including LightGBM) are suppressed
+  during this phase so the console remains clean until the final SUMMARY is printed.
 - Interactive mode: when run with no CLI args from a TTY, the script prompts for runtime options.
 - Signals: unified five-level signal system (STRONGBUY, BUY, FLAT, SELL, STRONGSELL).
 
