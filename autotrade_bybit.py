@@ -184,6 +184,52 @@ class BybitClient:
         
         return None, "failed"
     
+    async def get_instrument_info(self, symbol: str) -> dict:
+        """Get instrument info including min quantity and precision."""
+        try:
+            url = f"{self.base_url}/v5/market/instruments-info"
+            params = {"category": "linear", "symbol": symbol}
+            
+            async with self.session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = data.get("result", {})
+                    instruments = result.get("list", [])
+                    if instruments:
+                        return instruments[0]
+        except Exception as e:
+            print(f"Error getting instrument info: {e}")
+        return {}
+    
+    def format_quantity(self, qty: float, lot_size_filter: dict) -> str:
+        """Format quantity according to Bybit's lot size rules."""
+        min_qty = float(lot_size_filter.get("minOrderQty", "0.001"))
+        max_qty = float(lot_size_filter.get("maxOrderQty", "1000000"))
+        qty_step = float(lot_size_filter.get("qtyStep", "0.001"))
+        
+        # Ensure quantity meets minimum
+        if qty < min_qty:
+            qty = min_qty
+        
+        # Ensure quantity doesn't exceed maximum
+        if qty > max_qty:
+            qty = max_qty
+        
+        # Round to proper step size
+        qty = round(qty / qty_step) * qty_step
+        
+        # Format with appropriate decimal places
+        if qty_step >= 1:
+            return f"{qty:.0f}"
+        elif qty_step >= 0.1:
+            return f"{qty:.1f}"
+        elif qty_step >= 0.01:
+            return f"{qty:.2f}"
+        elif qty_step >= 0.001:
+            return f"{qty:.3f}"
+        else:
+            return f"{qty:.6f}"
+    
     async def get_positions(self, symbol: str) -> list:
         """Get current positions for a symbol."""
         try:
@@ -569,9 +615,17 @@ async def main():
             # Calculate TP/SL prices
             tp_price, sl_price = calculate_tp_sl_prices(market_price, predicted_pct, side)
             
+            # Get instrument info for proper quantity formatting
+            instrument_info = await client.get_instrument_info(args.symbol)
+            lot_size_filter = instrument_info.get("lotSizeFilter", {})
+            
             # Calculate position size
             position_value_usd = max(args.min_usd, args.min_usd)  # Use minimum for now
-            qty = position_value_usd / market_price
+            qty_raw = position_value_usd / market_price
+            
+            # Format quantity according to Bybit rules
+            qty_formatted = client.format_quantity(qty_raw, lot_size_filter)
+            qty = float(qty_formatted)  # Convert back to float for calculations
             
             audit_log.update({
                 "side": side.lower(),
@@ -579,8 +633,11 @@ async def main():
                 "price_source": price_source,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "qty_raw": qty_raw,
+                "qty_formatted": qty_formatted,
                 "qty": qty,
-                "position_value_usd": position_value_usd
+                "position_value_usd": position_value_usd,
+                "instrument_info": instrument_info
             })
             
             print(f"\nTRADE DECISION:")
@@ -588,9 +645,15 @@ async def main():
             print(f"Entry Price: ${market_price:.4f} ({price_source})")
             print(f"Take Profit: ${tp_price:.4f}")
             print(f"Stop Loss: ${sl_price:.4f}")
-            print(f"Quantity: {qty:.6f}")
+            print(f"Quantity: {qty_formatted} (raw: {qty_raw:.6f})")
             print(f"Position Value: ${position_value_usd:.2f}")
             print(f"Reason: {decision_reason}")
+            
+            # Show instrument constraints for debugging
+            if lot_size_filter:
+                print(f"Min Qty: {lot_size_filter.get('minOrderQty', 'unknown')}, " +
+                      f"Max Qty: {lot_size_filter.get('maxOrderQty', 'unknown')}, " +
+                      f"Step: {lot_size_filter.get('qtyStep', 'unknown')}")
             
             if args.live:
                 # Confirm live trade execution
@@ -647,8 +710,8 @@ async def main():
                     print(f"Warning: Failed to set leverage: {leverage_result}")
                 
                 # Step 3: Place market entry order
-                print(f"Placing {side} market order for {qty:.6f} {args.symbol}...")
-                entry_result = await client.place_market_order(args.symbol, side, f"{qty:.6f}")
+                print(f"Placing {side} market order for {qty_formatted} {args.symbol}...")
+                entry_result = await client.place_market_order(args.symbol, side, qty_formatted)
                 audit_log["entry_order"] = entry_result
                 
                 if not entry_result["success"]:
@@ -667,7 +730,7 @@ async def main():
                 # Step 4: Place TP/SL orders
                 print("Placing TP/SL orders...")
                 tp_sl_result = await client.place_tp_sl_order(
-                    args.symbol, side, f"{qty:.6f}", tp_price, sl_price
+                    args.symbol, side, qty_formatted, tp_price, sl_price
                 )
                 audit_log["tp_sl_orders"] = tp_sl_result
                 
