@@ -9,6 +9,7 @@ Features:
 - Default dry-run mode with TTY confirmation for live trades
 - 5-minute candle boundary timing
 - Position management (close existing before opening new)
+- Smart position sizing: 75% of available balance with leverage
 - Take-profit and stop-loss with configurable parameters
 - Minimum profit threshold filtering
 - Comprehensive JSON audit logging
@@ -52,7 +53,8 @@ DEFAULT_SYMBOL = "BTCUSDT"
 DEFAULT_LEVERAGE = 10
 SL_FRAC = 0.025  # 2.5% stop-loss
 MIN_PROFIT_THRESHOLD = 0.01  # 1% minimum profit requirement
-DEFAULT_MIN_USD = 10.0  # Minimum position size in USD
+DEFAULT_MIN_USD = 10.0  # Fallback minimum if balance check fails
+BALANCE_PERCENTAGE = 0.75  # Use 75% of available balance
 
 # Bybit endpoints
 BYBIT_MAINNET_BASE = "https://api.bybit.com"
@@ -229,6 +231,29 @@ class BybitClient:
             return f"{qty:.3f}"
         else:
             return f"{qty:.6f}"
+    
+    async def get_wallet_balance(self) -> float:
+        """Get available USDT balance from wallet."""
+        try:
+            url = f"{self.base_url}/v5/account/wallet-balance"
+            params = {"accountType": "UNIFIED"}  # or "CONTRACT" for derivatives only
+            headers = self._get_auth_headers()
+            
+            async with self.session.get(url, params=params, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = data.get("result", {})
+                    accounts = result.get("list", [])
+                    
+                    if accounts:
+                        coins = accounts[0].get("coin", [])
+                        for coin in coins:
+                            if coin.get("coin") == "USDT":
+                                available_balance = float(coin.get("availableToWithdraw", "0"))
+                                return available_balance
+        except Exception as e:
+            print(f"Error getting wallet balance: {e}")
+        return 0.0
     
     async def get_positions(self, symbol: str) -> list:
         """Get current positions for a symbol."""
@@ -444,27 +469,38 @@ def get_trading_decision(prediction_result: dict) -> Tuple[Optional[str], str, f
         # FirstOne returns: {'name': 'FirstOne', 'signal': 'SELL', 'reason': 'Original ensemble decision'}
         overall_signal = prediction_result.get("signal", "FLAT")
         
-        # Since FirstOne doesn't provide explicit percentage predictions in the return value,
-        # we'll infer reasonable percentages based on signal strength for profit calculations
+        # Try to extract the actual 5m Δ% from FirstOne's output
+        # The output contains delta percentages in the printed format
         predicted_pct = 0.0
         
-        if overall_signal == "STRONGBUY":
-            predicted_pct = 2.5  # Assume strong buy signals represent 2.5%+ moves
-        elif overall_signal == "BUY":
-            predicted_pct = 1.5  # Assume buy signals represent 1.5%+ moves
-        elif overall_signal == "STRONGSELL":
-            predicted_pct = -2.5  # Assume strong sell signals represent 2.5%+ moves
-        elif overall_signal == "SELL":
-            predicted_pct = -1.5  # Assume sell signals represent 1.5%+ moves
-        else:
-            predicted_pct = 0.0   # FLAT or unknown signals
+        # FirstOne may include additional data beyond the basic response
+        # Check if there's timeframe-specific data available
+        if "timeframes" in prediction_result:
+            tf_data = prediction_result.get("timeframes", {})
+            if "5m" in tf_data:
+                predicted_pct = tf_data["5m"].get("delta_pct", 0.0)
+        
+        # If no timeframe data, try to parse from the printed output or use signal-based estimation
+        if predicted_pct == 0.0:
+            # For now, use signal-based estimation until we can parse the actual Δ% output
+            if overall_signal == "STRONGBUY":
+                predicted_pct = 2.5  # Assume strong buy signals represent 2.5%+ moves
+            elif overall_signal == "BUY":
+                predicted_pct = 1.5  # Assume buy signals represent 1.5%+ moves
+            elif overall_signal == "STRONGSELL":
+                predicted_pct = -2.5  # Assume strong sell signals represent 2.5%+ moves
+            elif overall_signal == "SELL":
+                predicted_pct = -1.5  # Assume sell signals represent 1.5%+ moves
+            else:
+                predicted_pct = 0.0   # FLAT or unknown signals
         
         # Convert to decimal form (e.g., 1.5% -> 0.015)
-        predicted_pct = predicted_pct / 100.0
+        if abs(predicted_pct) > 1.0:  # If it's in percentage form
+            predicted_pct = predicted_pct / 100.0
         
         # Map signal to trading side
         side = SIGNAL_TO_SIDE.get(overall_signal)
-        reason = f"FirstOne signal: {overall_signal}, estimated move: {predicted_pct:.3f}%"
+        reason = f"FirstOne signal: {overall_signal}, 5m Δ%: {predicted_pct*100:.3f}%"
         
         return side, reason, predicted_pct
         
@@ -504,7 +540,7 @@ async def main():
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL, help="Trading symbol (default: BTCUSDT)")
     parser.add_argument("--live", action="store_true", help="Execute live trades (default: dry-run)")
     parser.add_argument("--leverage", type=int, default=DEFAULT_LEVERAGE, help=f"Leverage (default: {DEFAULT_LEVERAGE})")
-    parser.add_argument("--min-usd", type=float, default=DEFAULT_MIN_USD, help=f"Minimum position size in USD (default: {DEFAULT_MIN_USD})")
+    parser.add_argument("--min-usd", type=float, default=DEFAULT_MIN_USD, help=f"Fallback minimum position size in USD if balance check fails (default: {DEFAULT_MIN_USD})")
     parser.add_argument("--no-wait", action="store_true", help="Run immediately without waiting for 5-min candle boundary")
     
     args = parser.parse_args()
@@ -513,7 +549,7 @@ async def main():
     print(f"Symbol: {args.symbol}")
     print(f"Mode: {'LIVE' if args.live else 'DRY-RUN'}")
     print(f"Leverage: {args.leverage}x")
-    print(f"Min Position: ${args.min_usd}")
+    print(f"Position Sizing: {BALANCE_PERCENTAGE*100}% of balance (fallback: ${args.min_usd})")
     print(f"Timing: {'Immediate' if args.no_wait else '5-min boundary aligned'}")
     print("-" * 50)
     
@@ -551,8 +587,15 @@ async def main():
             print(f"SKIP: {reason}")
             return
         
-        # Extract trading decision
-        side, decision_reason, predicted_pct = get_trading_decision(prediction_result)
+        # Get core forecast data to extract actual 5m delta percentage
+        print("Extracting 5m delta percentage...")
+        core_data = await cryptoforecast._core_forecast(args.symbol)
+        dpcts_tmp = core_data.get('dpcts_tmp', {}) if isinstance(core_data, dict) else {}
+        actual_5m_delta_pct = dpcts_tmp.get('5m', 0.0) if isinstance(dpcts_tmp, dict) else 0.0
+        print(f"Actual 5m Δ%: {actual_5m_delta_pct:.4f}%")
+        
+        # Extract trading decision with actual 5m delta
+        side, decision_reason, predicted_pct = get_trading_decision(prediction_result, actual_5m_delta_pct)
         audit_log.update({
             "predicted_delta_pct": predicted_pct,
             "decision_reason": decision_reason
@@ -619,13 +662,33 @@ async def main():
             instrument_info = await client.get_instrument_info(args.symbol)
             lot_size_filter = instrument_info.get("lotSizeFilter", {})
             
-            # Calculate position size
-            position_value_usd = max(args.min_usd, args.min_usd)  # Use minimum for now
-            qty_raw = position_value_usd / market_price
+            # Get available balance for position sizing
+            available_balance = 0.0
+            if args.live:
+                available_balance = await client.get_wallet_balance()
+                print(f"Available USDT balance: ${available_balance:.2f}")
+            
+            # Calculate position size using 75% of available balance or fallback to min USD
+            if available_balance > 0:
+                position_value_usd = available_balance * BALANCE_PERCENTAGE
+                print(f"Using {BALANCE_PERCENTAGE*100}% of balance: ${position_value_usd:.2f}")
+            else:
+                position_value_usd = args.min_usd
+                print(f"Using fallback minimum: ${position_value_usd:.2f}")
+            
+            # Calculate quantity considering leverage
+            # For leveraged trading, we can control more value with less capital
+            # Position value = (qty * price) / leverage for margin calculation
+            # But qty itself should be based on the leveraged position size we want
+            leveraged_position_value = position_value_usd * args.leverage
+            qty_raw = leveraged_position_value / market_price
             
             # Format quantity according to Bybit rules
             qty_formatted = client.format_quantity(qty_raw, lot_size_filter)
             qty = float(qty_formatted)  # Convert back to float for calculations
+            
+            # Calculate actual margin required
+            margin_required = (qty * market_price) / args.leverage
             
             audit_log.update({
                 "side": side.lower(),
@@ -633,10 +696,14 @@ async def main():
                 "price_source": price_source,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "available_balance": available_balance,
+                "balance_percentage": BALANCE_PERCENTAGE,
+                "position_value_usd": position_value_usd,
+                "leveraged_position_value": leveraged_position_value,
+                "margin_required": margin_required,
                 "qty_raw": qty_raw,
                 "qty_formatted": qty_formatted,
                 "qty": qty,
-                "position_value_usd": position_value_usd,
                 "instrument_info": instrument_info
             })
             
@@ -645,8 +712,10 @@ async def main():
             print(f"Entry Price: ${market_price:.4f} ({price_source})")
             print(f"Take Profit: ${tp_price:.4f}")
             print(f"Stop Loss: ${sl_price:.4f}")
+            print(f"Leverage: {args.leverage}x")
+            print(f"Position Value: ${leveraged_position_value:.2f} (leveraged)")
+            print(f"Margin Required: ${margin_required:.2f}")
             print(f"Quantity: {qty_formatted} (raw: {qty_raw:.6f})")
-            print(f"Position Value: ${position_value_usd:.2f}")
             print(f"Reason: {decision_reason}")
             
             # Show instrument constraints for debugging
