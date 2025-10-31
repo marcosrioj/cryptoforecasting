@@ -259,12 +259,14 @@ async def fetch_positions_list(session: aiohttp.ClientSession, symbol: str):
     return pos_list
 
 
-def print_trade_summary(symbol: str, signal: str, side: str, qty: float, entry_price: float, tp_price: float, sl_price: float, executed_resp: dict, pos_list: list, dry_run: bool):
+def print_trade_summary(symbol: str, signal: str, side: str, qty: float, entry_price: float, tp_price: float, sl_price: float, executed_resp: dict, pos_list: list, dry_run: bool, market_price: Optional[float] = None):
     print(_divider("="))
     print(f"AUTOTRADE SUMMARY for {symbol} — {datetime.now(timezone.utc).isoformat()}")
     print(_divider("="))
     print(f"Signal     : {signal}")
     print(f"Planned side: {side}  Qty: {qty:.6f}")
+    print(f"Market price: {market_price if market_price is not None else 'N/A'}")
+    # Entry price parameter is the planned entry based on core; show both
     print(f"Entry price : {entry_price}")
     print(f"Take Profit : {tp_price}")
     print(f"Stop Loss   : {sl_price}")
@@ -294,7 +296,16 @@ def weighted_dpct(dpcts: dict) -> float:
 # Core trading logic per symbol
 async def handle_symbol(symbol: str, dry_run: bool = True):
     symbol = normalize_symbol(symbol)
-    print(f"[autotrade] Checking {symbol} at {datetime.now(timezone.utc).isoformat()} (dry_run={dry_run})")
+    # Fetch a live market price early so we can show it in logs and use it as
+    # the primary source for entry/TP/SL decisions. We still fallback to core
+    # last-price when the public API is unavailable.
+    market_price = None
+    try:
+        async with aiohttp.ClientSession() as _sess:
+            market_price = await fetch_current_price_public(_sess, symbol)
+    except Exception:
+        market_price = None
+    print(f"[autotrade] Checking {symbol} at {datetime.now(timezone.utc).isoformat()} (dry_run={dry_run}) market_price={market_price}")
 
     # Run shared core and get FirstOne decision
     core = await cf._core_forecast(symbol)
@@ -324,10 +335,9 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
     # take profit delta uses the 5m predicted Δ% (we apply the 90% safety factor as before)
     tp_pct = dpct_5m * 0.9
 
-    # fetch current mid/last price from Bybit public API to ensure live market price
-    price = None
-    async with aiohttp.ClientSession() as sess:
-        price = await fetch_current_price_public(sess, symbol)
+    # Use the early-fetched market price when available; otherwise fall back
+    # to the core's last-known close price.
+    price = market_price
     # fallback to core results if public price unavailable
     if price is None:
         for tf in sorted(cf.WEIGHTS.keys(), key=lambda k: -cf.WEIGHTS[k]):
@@ -376,7 +386,7 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         if BYBIT_API_KEY and BYBIT_API_SECRET:
             async with aiohttp.ClientSession() as sess:
                 pos_list = await fetch_positions_list(sess, symbol)
-        print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=dry_run)
+            print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=dry_run, market_price=market_price)
         return
     if side == "Sell" and tp_price >= price:
         print(f"[autotrade] Skipping order: computed TP ({tp_price:.8f}) >= current price ({price:.8f}) — no downside")
@@ -384,7 +394,7 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         if BYBIT_API_KEY and BYBIT_API_SECRET:
             async with aiohttp.ClientSession() as sess:
                 pos_list = await fetch_positions_list(sess, symbol)
-        print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=dry_run)
+        print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=dry_run, market_price=market_price)
         return
 
     # If dry-run, just print the actions
@@ -408,7 +418,7 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
                 if BYBIT_API_KEY and BYBIT_API_SECRET:
                     async with aiohttp.ClientSession() as sess:
                         pos_list = await fetch_positions_list(sess, symbol)
-                print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True)
+                print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True, market_price=market_price)
                 return
         else:
             # Non-interactive: show summary and return
@@ -416,7 +426,7 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
             if BYBIT_API_KEY and BYBIT_API_SECRET:
                 async with aiohttp.ClientSession() as sess:
                     pos_list = await fetch_positions_list(sess, symbol)
-            print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True)
+            print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list, dry_run=True, market_price=market_price)
             return
 
     # Live mode: perform API calls
@@ -464,21 +474,21 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
             if side == "Buy" and live_now > price:
                 print(f"[autotrade] Skipping open order: live price {live_now} > planned entry {price} (moved up for BUY)")
                 pos_list_after = await fetch_positions_list(sess, symbol)
-                print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list_after, dry_run=False)
+                print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list_after, dry_run=False, market_price=market_price)
                 return
             # For sells: if price decreased below planned entry, skip
             if side == "Sell" and live_now < price:
                 print(f"[autotrade] Skipping open order: live price {live_now} < planned entry {price} (moved down for SELL)")
                 pos_list_after = await fetch_positions_list(sess, symbol)
-                print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list_after, dry_run=False)
+                print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list_after, dry_run=False, market_price=market_price)
                 return
 
         # 3) place market order to open position
         open_res = await place_market_order(sess, symbol, side, qty=qty, reduce_only=False, take_profit=tp_price, stop_loss=sl_price)
         print(f"[autotrade] Open order response: {open_res}")
         # after placing order, fetch current positions and print a UX summary (inside same session)
-        pos_list_after = await fetch_positions_list(sess, symbol)
-        print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=open_res, pos_list=pos_list_after, dry_run=False)
+    pos_list_after = await fetch_positions_list(sess, symbol)
+    print_trade_summary(symbol, sig, side, qty, price, tp_price, sl_price, executed_resp=open_res, pos_list=pos_list_after, dry_run=False, market_price=market_price)
 
 # Scheduler: align to 5-minute boundaries and run forever (or once)
 async def scheduler(symbol: str, dry_run: bool = True, once: bool = False):
