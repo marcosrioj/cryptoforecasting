@@ -410,6 +410,80 @@ class BybitClient:
                 "orders": []
             }
 
+    async def place_tp_limit_order(self, symbol: str, side: str, qty: str, tp_price: float) -> dict:
+        """Place take-profit as a limit order (reduce-only) instead of traditional TP."""
+        try:
+            url = f"{self.base_url}/v5/order/create"
+            
+            # Determine opposite side for TP (close position)
+            tp_side = "Sell" if side == "Buy" else "Buy"
+            
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "side": tp_side,
+                "orderType": "Limit",
+                "qty": qty,
+                "price": str(tp_price),
+                "reduceOnly": True,  # Ensure it's reduce-only
+                "timeInForce": "GTC"  # Good Till Cancelled
+            }
+            
+            headers = self._get_auth_headers(json.dumps(params))
+            
+            async with self.session.post(url, json=params, headers=headers) as resp:
+                data = await resp.json()
+                return {
+                    "success": resp.status == 200 and data.get("retCode") == 0,
+                    "response": data,
+                    "tp_price": tp_price,
+                    "order_type": "limit_tp"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "order_type": "limit_tp"
+            }
+
+    async def place_sl_order(self, symbol: str, side: str, qty: str, sl_price: float) -> dict:
+        """Place stop-loss as a stop market order (reduce-only)."""
+        try:
+            url = f"{self.base_url}/v5/order/create"
+            
+            # Determine opposite side for SL (close position)
+            sl_side = "Sell" if side == "Buy" else "Buy"
+            
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "side": sl_side,
+                "orderType": "Market",
+                "qty": qty,
+                "stopLoss": str(sl_price),
+                "reduceOnly": True,  # Ensure it's reduce-only
+                "timeInForce": "GTC"
+            }
+            
+            headers = self._get_auth_headers(json.dumps(params))
+            
+            async with self.session.post(url, json=params, headers=headers) as resp:
+                data = await resp.json()
+                return {
+                    "success": resp.status == 200 and data.get("retCode") == 0,
+                    "response": data,
+                    "sl_price": sl_price,
+                    "order_type": "stop_loss"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "order_type": "stop_loss"
+            }
+
 
 def wait_for_candle_boundary() -> None:
     """Wait until the next 5-minute candle boundary if not already aligned."""
@@ -442,14 +516,18 @@ def wait_for_candle_boundary() -> None:
 
 
 def calculate_tp_sl_prices(entry_price: float, predicted_pct: float, side: str) -> Tuple[float, float]:
-    """Calculate take-profit and stop-loss prices."""
+    """Calculate take-profit and stop-loss prices.
+    
+    TP price uses the actual Δ% variation directly (e.g., 0.15% delta = 0.15% TP).
+    Leverage does NOT influence the TP price calculation.
+    """
     if side.lower() == "buy":
-        # LONG position
-        tp_price = entry_price * (1 + abs(predicted_pct))  # Use full predicted move
+        # LONG position: TP above entry, SL below entry
+        tp_price = entry_price * (1 + abs(predicted_pct))  # Use actual delta % directly
         sl_price = entry_price * (1 - SL_FRAC)  # 2.5% below entry
     else:
-        # SHORT position  
-        tp_price = entry_price * (1 - abs(predicted_pct))  # Use full predicted move
+        # SHORT position: TP below entry, SL above entry
+        tp_price = entry_price * (1 - abs(predicted_pct))  # Use actual delta % directly
         sl_price = entry_price * (1 + SL_FRAC)  # 2.5% above entry
     
     return tp_price, sl_price
@@ -463,44 +541,35 @@ def check_minimum_profit(predicted_pct: float, leverage: int) -> Tuple[bool, flo
     return meets_threshold, effective_move
 
 
-def get_trading_decision(prediction_result: dict) -> Tuple[Optional[str], str, float]:
+def get_trading_decision(prediction_result: dict, actual_5m_delta_pct: float = 0.0) -> Tuple[Optional[str], str, float]:
     """Extract trading decision from FirstOne prediction result."""
     try:
         # FirstOne returns: {'name': 'FirstOne', 'signal': 'SELL', 'reason': 'Original ensemble decision'}
         overall_signal = prediction_result.get("signal", "FLAT")
         
-        # Try to extract the actual 5m Δ% from FirstOne's output
-        # The output contains delta percentages in the printed format
-        predicted_pct = 0.0
+        # Use the actual 5m Δ% from FirstOne core data for take-profit calculation
+        predicted_pct = actual_5m_delta_pct
         
-        # FirstOne may include additional data beyond the basic response
-        # Check if there's timeframe-specific data available
-        if "timeframes" in prediction_result:
-            tf_data = prediction_result.get("timeframes", {})
-            if "5m" in tf_data:
-                predicted_pct = tf_data["5m"].get("delta_pct", 0.0)
+        # Convert to decimal form if it's in percentage (FirstOne returns as percentage)
+        if abs(predicted_pct) > 1.0:  # If it's in percentage form like 1.5
+            predicted_pct = predicted_pct / 100.0
         
-        # If no timeframe data, try to parse from the printed output or use signal-based estimation
-        if predicted_pct == 0.0:
-            # For now, use signal-based estimation until we can parse the actual Δ% output
+        # If the actual delta is too small, fall back to signal-based estimation for minimum moves
+        if abs(predicted_pct) < 0.005:  # Less than 0.5%
             if overall_signal == "STRONGBUY":
-                predicted_pct = 2.5  # Assume strong buy signals represent 2.5%+ moves
+                predicted_pct = 0.025  # 2.5%
             elif overall_signal == "BUY":
-                predicted_pct = 1.5  # Assume buy signals represent 1.5%+ moves
+                predicted_pct = 0.015  # 1.5%
             elif overall_signal == "STRONGSELL":
-                predicted_pct = -2.5  # Assume strong sell signals represent 2.5%+ moves
+                predicted_pct = -0.025  # -2.5%
             elif overall_signal == "SELL":
-                predicted_pct = -1.5  # Assume sell signals represent 1.5%+ moves
+                predicted_pct = -0.015  # -1.5%
             else:
                 predicted_pct = 0.0   # FLAT or unknown signals
         
-        # Convert to decimal form (e.g., 1.5% -> 0.015)
-        if abs(predicted_pct) > 1.0:  # If it's in percentage form
-            predicted_pct = predicted_pct / 100.0
-        
         # Map signal to trading side
         side = SIGNAL_TO_SIDE.get(overall_signal)
-        reason = f"FirstOne signal: {overall_signal}, 5m Δ%: {predicted_pct*100:.3f}%"
+        reason = f"FirstOne signal: {overall_signal}, 5m Δ%: {predicted_pct*100:.3f}% (actual: {actual_5m_delta_pct:.3f}%)"
         
         return side, reason, predicted_pct
         
@@ -796,19 +865,37 @@ async def main():
                 
                 print(f"Entry order placed successfully: {entry_result.get('order_id')}")
                 
-                # Step 4: Place TP/SL orders
-                print("Placing TP/SL orders...")
-                tp_sl_result = await client.place_tp_sl_order(
-                    args.symbol, side, qty_formatted, tp_price, sl_price
-                )
-                audit_log["tp_sl_orders"] = tp_sl_result
+                # Step 4: Place TP as limit order and SL as stop order
+                print("Placing TP limit order and SL stop order...")
                 
-                if not tp_sl_result["success"]:
-                    print(f"Warning: Failed to place TP/SL orders")
-                    print(f"TP/SL Response: {tp_sl_result}")
-                    # Don't fail the entire trade for TP/SL issues
+                # Place TP as limit order (reduce-only)
+                tp_result = await client.place_tp_limit_order(
+                    args.symbol, side, qty_formatted, tp_price
+                )
+                
+                # Place SL as stop market order (reduce-only)
+                sl_result = await client.place_sl_order(
+                    args.symbol, side, qty_formatted, sl_price
+                )
+                
+                audit_log["tp_order"] = tp_result
+                audit_log["sl_order"] = sl_result
+                
+                # Report results
+                if tp_result["success"]:
+                    print(f"TP limit order placed successfully at {tp_price:.4f}")
                 else:
-                    print("TP/SL orders placed successfully")
+                    print(f"Warning: Failed to place TP limit order: {tp_result.get('error', 'Unknown error')}")
+                
+                if sl_result["success"]:
+                    print(f"SL stop order placed successfully at {sl_price:.4f}")
+                else:
+                    print(f"Warning: Failed to place SL stop order: {sl_result.get('error', 'Unknown error')}")
+                
+                # Don't fail the entire trade for TP/SL issues
+                tp_sl_success = tp_result["success"] and sl_result["success"]
+                if tp_sl_success:
+                    print("Both TP and SL orders placed successfully")
                 
                 audit_log["live_execution_completed"] = True
                 print("✅ LIVE trade execution completed")
