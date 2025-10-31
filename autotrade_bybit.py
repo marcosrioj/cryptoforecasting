@@ -20,11 +20,12 @@ Environment Variables Required for Live Trading:
 - BYBIT_TESTNET: Set to "true" for testnet (optional, defaults to mainnet)
 
 Usage:
-    python3 autotrade_bybit.py [--symbol SYMBOL] [--live] [--leverage N] [--min-usd USD]
+    python3 autotrade_bybit.py [--symbol SYMBOL] [--live] [--leverage N] [--min-usd USD] [--no-wait]
     
 Examples:
-    python3 autotrade_bybit.py                           # Dry-run BTCUSDT
-    python3 autotrade_bybit.py --symbol ETHUSDT --live   # Live trade ETHUSDT
+    python3 autotrade_bybit.py                           # Dry-run BTCUSDT, wait for 5-min boundary
+    python3 autotrade_bybit.py --symbol ETHUSDT --live   # Live trade ETHUSDT, wait for boundary
+    python3 autotrade_bybit.py --no-wait                 # Run immediately without waiting
     python3 autotrade_bybit.py --leverage 5 --min-usd 50 # Custom leverage & min size
 """
 
@@ -294,63 +295,40 @@ class BybitClient:
             }
     
     async def place_tp_sl_order(self, symbol: str, side: str, qty: str, tp_price: float = None, sl_price: float = None) -> dict:
-        """Place take-profit and stop-loss orders."""
+        """Place take-profit and stop-loss orders using Bybit's position TP/SL endpoint."""
         try:
-            url = f"{self.base_url}/v5/order/create"
-            
-            # Determine opposite side for TP/SL
-            close_side = "Sell" if side == "Buy" else "Buy"
-            
             orders_placed = []
             
-            # Place TP order if specified
-            if tp_price:
-                tp_params = {
+            # Use the position trading endpoint for TP/SL
+            if tp_price or sl_price:
+                url = f"{self.base_url}/v5/position/trading-stop"
+                
+                params = {
                     "category": "linear",
                     "symbol": symbol,
-                    "side": close_side,
-                    "orderType": "Limit",
-                    "qty": qty,
-                    "price": str(tp_price),
-                    "reduceOnly": True,
-                    "timeInForce": "GTC"
+                    "positionIdx": 0  # One-way mode
                 }
                 
-                headers = self._get_auth_headers(json.dumps(tp_params))
-                async with self.session.post(url, json=tp_params, headers=headers) as resp:
-                    tp_data = await resp.json()
-                    orders_placed.append({
-                        "type": "take_profit",
-                        "success": resp.status == 200 and tp_data.get("retCode") == 0,
-                        "response": tp_data,
-                        "order_id": tp_data.get("result", {}).get("orderId") if resp.status == 200 else None
-                    })
-            
-            # Place SL order if specified  
-            if sl_price:
-                sl_params = {
-                    "category": "linear",
-                    "symbol": symbol,
-                    "side": close_side,
-                    "orderType": "Market",
-                    "qty": qty,
-                    "stopLoss": str(sl_price),
-                    "reduceOnly": True,
-                    "timeInForce": "IOC"
-                }
+                if tp_price:
+                    params["takeProfit"] = str(tp_price)
+                    
+                if sl_price:
+                    params["stopLoss"] = str(sl_price)
                 
-                headers = self._get_auth_headers(json.dumps(sl_params))
-                async with self.session.post(url, json=sl_params, headers=headers) as resp:
-                    sl_data = await resp.json()
+                headers = self._get_auth_headers(json.dumps(params))
+                
+                async with self.session.post(url, json=params, headers=headers) as resp:
+                    data = await resp.json()
                     orders_placed.append({
-                        "type": "stop_loss", 
-                        "success": resp.status == 200 and sl_data.get("retCode") == 0,
-                        "response": sl_data,
-                        "order_id": sl_data.get("result", {}).get("orderId") if resp.status == 200 else None
+                        "type": "tp_sl_combined",
+                        "success": resp.status == 200 and data.get("retCode") == 0,
+                        "response": data,
+                        "tp_price": tp_price,
+                        "sl_price": sl_price
                     })
             
             return {
-                "success": all(order["success"] for order in orders_placed),
+                "success": all(order["success"] for order in orders_placed) if orders_placed else True,
                 "orders": orders_placed
             }
             
@@ -365,24 +343,30 @@ class BybitClient:
 def wait_for_candle_boundary() -> None:
     """Wait until the next 5-minute candle boundary if not already aligned."""
     now = datetime.now(timezone.utc)
-    # Calculate seconds past the hour
-    seconds_past_hour = now.minute * 60 + now.second + now.microsecond / 1_000_000
     
-    # Calculate seconds to next 5-minute boundary
-    next_boundary_seconds = ((seconds_past_hour // 300) + 1) * 300
+    # Calculate seconds into the current minute
+    seconds_into_minute = now.second + now.microsecond / 1_000_000
     
-    # If we're within 1 second of a boundary, consider ourselves aligned
-    if next_boundary_seconds - seconds_past_hour <= 1:
+    # Calculate which 5-minute interval we're in (0, 5, 10, 15, ...)
+    minutes_into_hour = now.minute
+    current_5min_interval = (minutes_into_hour // 5) * 5
+    next_5min_interval = current_5min_interval + 5
+    
+    # If next interval goes past 60, wrap to next hour
+    if next_5min_interval >= 60:
+        next_boundary = now.replace(hour=(now.hour + 1) % 24, minute=0, second=0, microsecond=0)
+    else:
+        next_boundary = now.replace(minute=next_5min_interval, second=0, microsecond=0)
+    
+    # Calculate wait time
+    wait_seconds = (next_boundary - now).total_seconds()
+    
+    # If we're within 2 seconds of a boundary, consider ourselves aligned
+    if wait_seconds <= 2:
         print(f"Already aligned to 5-min boundary: {now.strftime('%H:%M:%S')}")
         return
     
-    # Calculate wait time
-    wait_seconds = next_boundary_seconds - seconds_past_hour
-    if wait_seconds > 3600:  # If calculation goes past the hour
-        wait_seconds -= 3600
-    
-    next_time = now + timedelta(seconds=wait_seconds)
-    print(f"Waiting {wait_seconds:.1f}s for next 5-min boundary at {next_time.strftime('%H:%M:%S')}")
+    print(f"Waiting {wait_seconds:.1f}s for next 5-min boundary at {next_boundary.strftime('%H:%M:%S')}")
     time.sleep(wait_seconds)
 
 
@@ -402,6 +386,7 @@ def calculate_tp_sl_prices(entry_price: float, predicted_pct: float, side: str) 
 
 def check_minimum_profit(predicted_pct: float, leverage: int) -> Tuple[bool, float]:
     """Check if predicted move meets minimum profit threshold with leverage."""
+    # predicted_pct is already in decimal form (e.g., 0.015 for 1.5%)
     effective_move = abs(predicted_pct) * leverage
     meets_threshold = effective_move >= MIN_PROFIT_THRESHOLD
     return meets_threshold, effective_move
@@ -410,40 +395,30 @@ def check_minimum_profit(predicted_pct: float, leverage: int) -> Tuple[bool, flo
 def get_trading_decision(prediction_result: dict) -> Tuple[Optional[str], str, float]:
     """Extract trading decision from FirstOne prediction result."""
     try:
-        # FirstOne returns a dictionary with prediction data
-        # The overall signal should be in the 'sig' field
-        overall_signal = prediction_result.get("sig", "FLAT")
+        # FirstOne returns: {'name': 'FirstOne', 'signal': 'SELL', 'reason': 'Original ensemble decision'}
+        overall_signal = prediction_result.get("signal", "FLAT")
         
-        # Get 5-minute prediction percentage from FirstOne data
-        # FirstOne may return timeframe-specific data or overall data
+        # Since FirstOne doesn't provide explicit percentage predictions in the return value,
+        # we'll infer reasonable percentages based on signal strength for profit calculations
         predicted_pct = 0.0
         
-        # Try to extract prediction percentage from various possible locations
-        if "predicted_pct" in prediction_result:
-            predicted_pct = prediction_result["predicted_pct"]
-        elif "delta_pct" in prediction_result:
-            predicted_pct = prediction_result["delta_pct"]
-        elif "5m" in prediction_result:
-            tf_5m = prediction_result["5m"]
-            if isinstance(tf_5m, dict):
-                predicted_pct = tf_5m.get("predicted_pct", tf_5m.get("delta_pct", 0.0))
+        if overall_signal == "STRONGBUY":
+            predicted_pct = 2.5  # Assume strong buy signals represent 2.5%+ moves
+        elif overall_signal == "BUY":
+            predicted_pct = 1.5  # Assume buy signals represent 1.5%+ moves
+        elif overall_signal == "STRONGSELL":
+            predicted_pct = -2.5  # Assume strong sell signals represent 2.5%+ moves
+        elif overall_signal == "SELL":
+            predicted_pct = -1.5  # Assume sell signals represent 1.5%+ moves
+        else:
+            predicted_pct = 0.0   # FLAT or unknown signals
         
-        # If we still don't have a prediction, try to infer from signal strength
-        if predicted_pct == 0.0:
-            if overall_signal in ["STRONGBUY", "STRONGSELL"]:
-                # Assume strong signals represent at least 2% moves
-                predicted_pct = 2.0 if overall_signal == "STRONGBUY" else -2.0
-            elif overall_signal in ["BUY", "SELL"]:
-                # Assume regular signals represent at least 1% moves  
-                predicted_pct = 1.0 if overall_signal == "BUY" else -1.0
-        
-        # Convert to percentage if not already
-        if abs(predicted_pct) > 1.0:
-            predicted_pct = predicted_pct / 100.0
+        # Convert to decimal form (e.g., 1.5% -> 0.015)
+        predicted_pct = predicted_pct / 100.0
         
         # Map signal to trading side
         side = SIGNAL_TO_SIDE.get(overall_signal)
-        reason = f"FirstOne signal: {overall_signal}, predicted move: {predicted_pct:.3f}%"
+        reason = f"FirstOne signal: {overall_signal}, estimated move: {predicted_pct:.3f}%"
         
         return side, reason, predicted_pct
         
@@ -473,16 +448,8 @@ def write_audit_log(symbol: str, log_data: Dict[str, Any]) -> None:
 
 
 def confirm_live_trade() -> bool:
-    """Ask for manual confirmation if running in TTY for live trades."""
-    if not sys.stdin.isatty():
-        return False  # Not in a TTY, don't execute live trades
-    
-    try:
-        response = input("\nConfirm LIVE TRADE execution? (type 'YES' to confirm): ").strip()
-        return response == "YES"
-    except (EOFError, KeyboardInterrupt):
-        print("\nAborted by user")
-        return False
+    """Always return True - no manual confirmation needed."""
+    return True
 
 
 async def main():
@@ -492,6 +459,7 @@ async def main():
     parser.add_argument("--live", action="store_true", help="Execute live trades (default: dry-run)")
     parser.add_argument("--leverage", type=int, default=DEFAULT_LEVERAGE, help=f"Leverage (default: {DEFAULT_LEVERAGE})")
     parser.add_argument("--min-usd", type=float, default=DEFAULT_MIN_USD, help=f"Minimum position size in USD (default: {DEFAULT_MIN_USD})")
+    parser.add_argument("--no-wait", action="store_true", help="Run immediately without waiting for 5-min candle boundary")
     
     args = parser.parse_args()
     
@@ -500,10 +468,14 @@ async def main():
     print(f"Mode: {'LIVE' if args.live else 'DRY-RUN'}")
     print(f"Leverage: {args.leverage}x")
     print(f"Min Position: ${args.min_usd}")
+    print(f"Timing: {'Immediate' if args.no_wait else '5-min boundary aligned'}")
     print("-" * 50)
     
-    # Wait for 5-minute candle boundary
-    wait_for_candle_boundary()
+    # Wait for 5-minute candle boundary unless --no-wait is specified
+    if not args.no_wait:
+        wait_for_candle_boundary()
+    else:
+        print("Skipping 5-minute boundary wait (--no-wait specified)")
     
     # Initialize audit log data
     audit_log = {
@@ -513,7 +485,8 @@ async def main():
         "min_position_usd": args.min_usd,
         "sl_fraction": SL_FRAC,
         "min_profit_threshold": MIN_PROFIT_THRESHOLD,
-        "dry_run": not args.live
+        "dry_run": not args.live,
+        "timing_mode": "immediate" if args.no_wait else "boundary_aligned"
     }
     
     try:
@@ -679,13 +652,14 @@ async def main():
                 audit_log["entry_order"] = entry_result
                 
                 if not entry_result["success"]:
-                    reason = f"Failed to place entry order: {entry_result}"
+                    reason = f"Failed to place entry order: {entry_result.get('response', {}).get('retMsg', 'Unknown error')}"
                     audit_log.update({
                         "side": "skip",
                         "decision_reason": reason
                     })
                     write_audit_log(args.symbol, audit_log)
                     print(f"SKIP: {reason}")
+                    print(f"Full API response: {entry_result}")
                     return
                 
                 print(f"Entry order placed successfully: {entry_result.get('order_id')}")
@@ -698,7 +672,9 @@ async def main():
                 audit_log["tp_sl_orders"] = tp_sl_result
                 
                 if not tp_sl_result["success"]:
-                    print(f"Warning: Failed to place TP/SL orders: {tp_sl_result}")
+                    print(f"Warning: Failed to place TP/SL orders")
+                    print(f"TP/SL Response: {tp_sl_result}")
+                    # Don't fail the entire trade for TP/SL issues
                 else:
                     print("TP/SL orders placed successfully")
                 
