@@ -283,11 +283,19 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         print(f"[autotrade] FirstOne signal is {sig}; no action taken.")
         return
 
-    # compute weighted dpct from core
+    # compute dpct: prefer the 5m predicted Δ% from the core output (FirstOne 5m prediction)
+    # fallback to the weighted average if the 5m key is not present
     results, dpcts_tmp, duration, now_utc, summary_lines = core
-    avg_dpct = weighted_dpct(dpcts_tmp)  # in percent
-    # take profit delta is 90% of avg_dpct
-    tp_pct = avg_dpct * 0.9
+    dpct_5m = None
+    if isinstance(dpcts_tmp, dict):
+        # try common key variants for the 5-minute timeframe
+        dpct_5m = dpcts_tmp.get("5m") or dpcts_tmp.get("5min") or dpcts_tmp.get("05m")
+    if dpct_5m is None:
+        # fallback to weighted average across timeframes
+        avg_dpct = weighted_dpct(dpcts_tmp)  # in percent
+        dpct_5m = avg_dpct
+    # take profit delta uses the 5m predicted Δ% (we apply the 90% safety factor as before)
+    tp_pct = dpct_5m * 0.9
 
     # fetch current mid/last price from Bybit public API to ensure live market price
     price = None
