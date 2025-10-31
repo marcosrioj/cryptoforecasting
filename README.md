@@ -367,36 +367,93 @@ stores to inject credentials. Gmail app passwords are recommended for SMTP.
 
 Autotrade (Bybit futures)
 -------------------------
-A new helper script `autotrade_bybit.py` can run `cryptoforecast.FirstOne` and manage a single
-Bybit USDT perpetual position for a given symbol on a 5‑minute schedule (aligned to 0:00,
-0:05, 0:10 ...). Behavior:
+`autotrade_bybit.py` is a helper that uses `cryptoforecast.FirstOne` to manage a single Bybit
+USDT-perpetual position for a given symbol on a 5‑minute cadence (aligned to 00:00, 00:05,
+00:10 ...). It's designed for cautious automation and defaults to dry-run so you can inspect
+planned trades before enabling live execution.
 
-- If any previous open futures position exists for the symbol, the script will close it by
-  submitting a market reduce-only order before opening a new position.
-- If `FirstOne` reports `BUY` or `STRONGBUY`, the script opens a LONG position (10x leverage by
-  default). If the signal is `SELL` or `STRONGSELL`, it opens a SHORT position (10x).
-- Take profit is calculated as 90% of the weighted predicted Δ% across timeframes (i.e. 10%
-  less than the predicted Δ%). Stop loss is set to a 25% adverse move from entry.
+Key behaviors and safety rules
 
-Configuration (environment variables):
+- Dry-run by default: the script prints planned actions and writes a JSON audit for every
+  attempted execution under `logs/autotrade/<SYMBOL>/YYYY-MM-DD_HH-MM-SS.json`. From a TTY
+  you can optionally accept an immediate live execution for a single run.
+- Price source: the script prefers Bybit's mark price (v5 market tickers) for entry and
+  TP/SL calculations. It falls back to v5 ticker or v2 public tickers when mark price is
+  unavailable.
+- Position management: any existing position for the symbol is closed (market, reduce-only)
+  before a new position is opened. This keeps the bot focused on a single directional
+  position per-symbol.
+- Leverage: the script sets configured leverage (default 10×) before opening a new position.
+- Take Profit (TP): computed using the predicted 5m Δ% from `FirstOne`. The TP safety factor
+  is set to 1.0 (i.e., the full 5m predicted Δ% is used when computing the TP). This reflects
+  the requested conservative behavior of using the full short-term predicted move.
+- Stop Loss (SL): a fixed adverse move (default 2.5%) is used to protect capital. You can
+  edit `SL_FRAC` in the script to change this value.
+- Minimum profit threshold (default 0.25%): the bot enforces a minimum target profit on
+  margin before placing a trade. Because profits on futures are magnified by leverage, the
+  required price move is adjusted by leverage:
+
+  effective required price move = MIN_PROFIT_FRAC / LEVERAGE
+
+  For example, with MIN_PROFIT_FRAC = 0.25% and LEVERAGE = 10×, the entry price must allow a
+  ~0.025% move in price (0.25% / 10) to meet the margin profit target. If the computed TP
+  doesn't meet this effective requirement the trade is skipped and an audit entry records
+  the reason.
+
+- Auditing: every planned, skipped or executed attempt writes a JSON record into
+  `logs/autotrade/<SYMBOL>/` with fields including timestamp, symbol, signal, side, entry
+  price, market price used, 5m Δ% used, TP, SL, qty, leverage, effective required price
+  fraction, and the API response (for live runs). This is intended for post-mortem review
+  and compliance.
+
+Configuration (environment variables)
 
 - `BYBIT_API_KEY` — Bybit API key (required for live trading)
 - `BYBIT_API_SECRET` — Bybit API secret (required for live trading)
 - `BYBIT_TESTNET` — set to `1` to use Bybit testnet (recommended for testing)
 - `TRADE_USDT` — notional USDT amount per trade (default: `10`)
 - `TRADE_LEVERAGE` — leverage to use (default: `10`)
-- `BYBIT_CATEGORY` — Bybit category (`linear` is default; set if using another product)
+- `SL_FRAC` — stop-loss fraction (default `0.025` = 2.5%)
+- `MIN_PROFIT_FRAC` — minimum profit on margin required (default `0.0025` = 0.25%)
 
-Usage examples
+Quick usage examples
 
 Dry-run single cycle (recommended for testing):
 
 ```bash
-python3 autotrade_bybit.py --symbol BTC --dry-run --once
+python3 autotrade_bybit.py --symbol BTC --once
 ```
 
-This will normalize `BTC` → `BTCUSDT`, run `FirstOne` and print the actions it would take
-without placing any orders.
+Interactive dry-run -> live override (TTY):
+
+```bash
+python3 autotrade_bybit.py --symbol BTC
+```
+
+When run from a TTY the script prompts for symbol, notional, leverage and whether to
+execute the planned trade live. If you accept live execution from the prompt the script
+requires `BYBIT_API_KEY` and `BYBIT_API_SECRET` in the environment and will place signed
+orders.
+
+Non-interactive live run (testnet recommended):
+
+```bash
+BYBIT_TESTNET=1 BYBIT_API_KEY=... BYBIT_API_SECRET=... python3 autotrade_bybit.py --symbol BTC --live --once
+```
+
+Notes and recommended workflow
+
+- Always start with dry-run `--once` to inspect planned TP/SL, the 5m Δ% used, and the
+  generated audit JSON files.
+- Use Bybit testnet (`BYBIT_TESTNET=1`) for integration testing with your API keys before
+  enabling live mode.
+- Adjust `TRADE_USDT`, `TRADE_LEVERAGE`, `SL_FRAC` and `MIN_PROFIT_FRAC` in the environment
+  or directly in the script to match your risk profile.
+- The bot intentionally focuses on USDT perpetual (linear) products and will refuse to
+  trade non-USDT symbols.
+
+If you'd like, I can add a small CLI help command that prints the TP/SL formulas and a
+calculator to preview effective price-move thresholds for chosen leverage and MIN_PROFIT_FRAC.
 
 Testnet dry-run (no real money):
 
