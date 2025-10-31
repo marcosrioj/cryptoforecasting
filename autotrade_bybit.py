@@ -42,7 +42,7 @@ import cryptoforecast as cf
 BYBIT_API_KEY = os.environ.get("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET")
 BYBIT_TESTNET = os.environ.get("BYBIT_TESTNET") in ("1", "true", "True")
-TRADE_USDT = float(os.environ.get("TRADE_USDT") or 10.0)
+TRADE_USDT = float(os.environ.get("TRADE_USDT") or 5.0)
 LEVERAGE = int(os.environ.get("TRADE_LEVERAGE") or 10)
 CATEGORY = "linear"  # restrict to USDT perpetual (linear) markets only
 
@@ -93,20 +93,47 @@ async def fetch_current_price_public(session: aiohttp.ClientSession, symbol: str
     Returns a float price or None on failure.
     """
     try:
-        url = API_HOST + "/v2/public/tickers"
-        async with session.get(url, params={"symbol": symbol}, timeout=10) as resp:
-            data = await resp.json()
-        # v2 response: {ret_code:0, result: [ { 'last_price': '0.123', ... } ] }
+        # Prefer v5 tickers endpoint for the most consistent public data
+        url_v5 = API_HOST + "/v5/market/tickers"
+        async with session.get(url_v5, params={"category": CATEGORY, "symbol": symbol}, timeout=10) as resp:
+            try:
+                data = await resp.json()
+            except Exception:
+                data = None
+        # v5 response typically: {retCode:0, retMsg:'OK', result: [ { 'symbol':'BTCUSDT', 'lastPrice':'123.45', ... } ] }
         if isinstance(data, dict):
-            # common locations
-            if data.get("ret_code") == 0 and data.get("result"):
-                r0 = data.get("result")[0]
+            # Check common v5 shapes
+            if data.get("retCode") == 0 and data.get("result"):
+                rlist = data.get("result") or []
+                if isinstance(rlist, dict):
+                    rlist = [rlist]
+                if rlist:
+                    r0 = rlist[0]
+                    val = r0.get("lastPrice") or r0.get("last_price") or r0.get("last")
+                    if val is not None:
+                        return float(val)
+            # some responses use lower-case keys
+            if data.get("result") and isinstance(data.get("result"), dict):
+                r0 = list(data.get("result").values())[0]
+                val = r0.get("lastPrice") or r0.get("last_price") or r0.get("last")
+                if val is not None:
+                    return float(val)
+
+        # Fallback to older v2 endpoint shapes if v5 didn't return useful data
+        url_v2 = API_HOST + "/v2/public/tickers"
+        async with session.get(url_v2, params={"symbol": symbol}, timeout=10) as resp:
+            try:
+                data2 = await resp.json()
+            except Exception:
+                data2 = None
+        if isinstance(data2, dict):
+            if data2.get("ret_code") == 0 and data2.get("result"):
+                r0 = data2.get("result")[0]
                 val = r0.get("last_price") or r0.get("lastPrice") or r0.get("last")
                 if val is not None:
                     return float(val)
-            # some endpoints return 'data' list
-            if data.get("data"):
-                r0 = data.get("data")[0]
+            if data2.get("data"):
+                r0 = data2.get("data")[0]
                 val = r0.get("last_price") or r0.get("lastPrice") or r0.get("last")
                 if val is not None:
                     return float(val)
@@ -425,6 +452,26 @@ async def handle_symbol(symbol: str, dry_run: bool = True):
         # 2) set leverage
         lv = await set_leverage(sess, symbol, LEVERAGE)
         print(f"[autotrade] Set leverage response: {lv}")
+        # Before placing the opening order, re-check the live market price to ensure
+        # the market hasn't moved against our planned entry.
+        # If it has, skip creating the new order.
+        try:
+            live_now = await fetch_current_price_public(sess, symbol)
+        except Exception:
+            live_now = None
+        if live_now is not None:
+            # For buys: if price increased above planned entry, skip
+            if side == "Buy" and live_now > price:
+                print(f"[autotrade] Skipping open order: live price {live_now} > planned entry {price} (moved up for BUY)")
+                pos_list_after = await fetch_positions_list(sess, symbol)
+                print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list_after, dry_run=False)
+                return
+            # For sells: if price decreased below planned entry, skip
+            if side == "Sell" and live_now < price:
+                print(f"[autotrade] Skipping open order: live price {live_now} < planned entry {price} (moved down for SELL)")
+                pos_list_after = await fetch_positions_list(sess, symbol)
+                print_trade_summary(symbol, sig, side, 0.0, price, tp_price, sl_price, executed_resp=None, pos_list=pos_list_after, dry_run=False)
+                return
 
         # 3) place market order to open position
         open_res = await place_market_order(sess, symbol, side, qty=qty, reduce_only=False, take_profit=tp_price, stop_loss=sl_price)

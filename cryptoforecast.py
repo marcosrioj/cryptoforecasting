@@ -580,33 +580,26 @@ def print_core_summary(core, symbol: str, *, compact: bool = False, overall_over
     # header
     print_header(symbol, CATEGORY, now_str, thresholds, WEIGHTS, duration)
 
-    # compute vote/overall from results using signal multipliers
-    vote = 0
-    for tf, r in results.items():
-        mult = signal_to_multiplier(r.get("sig", "FLAT"))
-        vote += WEIGHTS.get(tf, 1) * mult
-    total_weight = sum(WEIGHTS.get(tf, 1) for tf in results.keys()) or 1
-    # Require a larger fraction of the available weight to be aligned for an
-    # overall STRONGBUY / STRONGSELL. Raising this fraction reduces false positives.
-    strong_th = total_weight * 0.7
-    if overall_override is not None:
-        overall = overall_override
-    else:
-        if vote >= strong_th:
-            overall = "STRONGBUY"
-        elif vote > 0:
-            overall = "BUY"
-        elif vote <= -strong_th:
-            overall = "STRONGSELL"
-        elif vote < 0:
-            overall = "SELL"
-        else:
-            overall = "FLAT"
+    # Compute OVERALL using the FirstOne multi-timeframe ensemble (1w,1d,4h,1h,5m).
+    # This ensures the OVERALL section reflects the core ensemble only and is
+    # not influenced by other registered strategies.
+    # FirstOne logic: simple weighted sum where BUY/STRONGBUY adds weight, SELL/STRONGSELL subtracts.
+    # Compute the FirstOne vote exactly as the FirstOne strategy does so the
+    # OVERALL displayed here matches the FirstOne strategy block below.
+    # FirstOne counts only exact 'BUY' as positive and 'SELL' as negative,
+    # ignoring STRONG variants for the numeric vote.
+    vote_firstone = sum(
+        (WEIGHTS.get(tf, 1) if r.get("sig") == "BUY" else -WEIGHTS.get(tf, 1) if r.get("sig") == "SELL" else 0)
+        for tf, r in results.items()
+    )
+    overall = "BUY" if vote_firstone > 0 else "SELL" if vote_firstone < 0 else "FLAT"
 
     if compact:
-        print_compact(symbol, overall, vote, ORDERED_TF, results, dpcts_tmp)
+        # For compact mode we still show the FirstOne-derived overall and the
+        # original vote computed above is not used for the OVERALL display.
+        print_compact(symbol, overall, vote_firstone, ORDERED_TF, results, dpcts_tmp)
     else:
-        print_overall(ORDERED_TF, results, vote, overall)
+        print_overall(ORDERED_TF, results, vote_firstone, overall)
         for tf in ORDERED_TF:
             r = results.get(tf)
             if r:
