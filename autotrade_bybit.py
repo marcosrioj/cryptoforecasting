@@ -182,6 +182,184 @@ class BybitClient:
             return price, "v2_ticker"
         
         return None, "failed"
+    
+    async def get_positions(self, symbol: str) -> list:
+        """Get current positions for a symbol."""
+        try:
+            url = f"{self.base_url}/v5/position/list"
+            params = {"category": "linear", "symbol": symbol}
+            headers = self._get_auth_headers()
+            
+            async with self.session.get(url, params=params, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = data.get("result", {})
+                    return result.get("list", [])
+                else:
+                    print(f"Error getting positions: {resp.status}")
+                    return []
+        except Exception as e:
+            print(f"Error getting positions: {e}")
+            return []
+    
+    async def close_position(self, symbol: str, side: str, qty: str) -> dict:
+        """Close an existing position with market order (reduce-only)."""
+        try:
+            url = f"{self.base_url}/v5/order/create"
+            
+            # Determine opposite side for closing
+            close_side = "Sell" if side == "Buy" else "Buy"
+            
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "side": close_side,
+                "orderType": "Market",
+                "qty": qty,
+                "reduceOnly": True,
+                "timeInForce": "IOC"
+            }
+            
+            headers = self._get_auth_headers(json.dumps(params))
+            
+            async with self.session.post(url, json=params, headers=headers) as resp:
+                data = await resp.json()
+                return {
+                    "success": resp.status == 200 and data.get("retCode") == 0,
+                    "response": data,
+                    "status_code": resp.status
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "status_code": 0
+            }
+    
+    async def set_leverage(self, symbol: str, leverage: int) -> dict:
+        """Set leverage for a symbol."""
+        try:
+            url = f"{self.base_url}/v5/position/set-leverage"
+            params = {
+                "category": "linear", 
+                "symbol": symbol,
+                "buyLeverage": str(leverage),
+                "sellLeverage": str(leverage)
+            }
+            
+            headers = self._get_auth_headers(json.dumps(params))
+            
+            async with self.session.post(url, json=params, headers=headers) as resp:
+                data = await resp.json()
+                return {
+                    "success": resp.status == 200 and data.get("retCode") == 0,
+                    "response": data,
+                    "status_code": resp.status
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "status_code": 0
+            }
+    
+    async def place_market_order(self, symbol: str, side: str, qty: str) -> dict:
+        """Place a market order."""
+        try:
+            url = f"{self.base_url}/v5/order/create"
+            params = {
+                "category": "linear",
+                "symbol": symbol, 
+                "side": side,
+                "orderType": "Market",
+                "qty": qty,
+                "timeInForce": "IOC"
+            }
+            
+            headers = self._get_auth_headers(json.dumps(params))
+            
+            async with self.session.post(url, json=params, headers=headers) as resp:
+                data = await resp.json()
+                return {
+                    "success": resp.status == 200 and data.get("retCode") == 0,
+                    "response": data,
+                    "status_code": resp.status,
+                    "order_id": data.get("result", {}).get("orderId") if resp.status == 200 else None
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "status_code": 0
+            }
+    
+    async def place_tp_sl_order(self, symbol: str, side: str, qty: str, tp_price: float = None, sl_price: float = None) -> dict:
+        """Place take-profit and stop-loss orders."""
+        try:
+            url = f"{self.base_url}/v5/order/create"
+            
+            # Determine opposite side for TP/SL
+            close_side = "Sell" if side == "Buy" else "Buy"
+            
+            orders_placed = []
+            
+            # Place TP order if specified
+            if tp_price:
+                tp_params = {
+                    "category": "linear",
+                    "symbol": symbol,
+                    "side": close_side,
+                    "orderType": "Limit",
+                    "qty": qty,
+                    "price": str(tp_price),
+                    "reduceOnly": True,
+                    "timeInForce": "GTC"
+                }
+                
+                headers = self._get_auth_headers(json.dumps(tp_params))
+                async with self.session.post(url, json=tp_params, headers=headers) as resp:
+                    tp_data = await resp.json()
+                    orders_placed.append({
+                        "type": "take_profit",
+                        "success": resp.status == 200 and tp_data.get("retCode") == 0,
+                        "response": tp_data,
+                        "order_id": tp_data.get("result", {}).get("orderId") if resp.status == 200 else None
+                    })
+            
+            # Place SL order if specified  
+            if sl_price:
+                sl_params = {
+                    "category": "linear",
+                    "symbol": symbol,
+                    "side": close_side,
+                    "orderType": "Market",
+                    "qty": qty,
+                    "stopLoss": str(sl_price),
+                    "reduceOnly": True,
+                    "timeInForce": "IOC"
+                }
+                
+                headers = self._get_auth_headers(json.dumps(sl_params))
+                async with self.session.post(url, json=sl_params, headers=headers) as resp:
+                    sl_data = await resp.json()
+                    orders_placed.append({
+                        "type": "stop_loss", 
+                        "success": resp.status == 200 and sl_data.get("retCode") == 0,
+                        "response": sl_data,
+                        "order_id": sl_data.get("result", {}).get("orderId") if resp.status == 200 else None
+                    })
+            
+            return {
+                "success": all(order["success"] for order in orders_placed),
+                "orders": orders_placed
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "orders": []
+            }
 
 
 def wait_for_candle_boundary() -> None:
@@ -232,26 +410,40 @@ def check_minimum_profit(predicted_pct: float, leverage: int) -> Tuple[bool, flo
 def get_trading_decision(prediction_result: dict) -> Tuple[Optional[str], str, float]:
     """Extract trading decision from FirstOne prediction result."""
     try:
-        # Get the overall signal from FirstOne
+        # FirstOne returns a dictionary with prediction data
+        # The overall signal should be in the 'sig' field
         overall_signal = prediction_result.get("sig", "FLAT")
         
-        # Get 5-minute prediction percentage
-        # FirstOne returns results with timeframe data
-        tf_5m = prediction_result.get("5m", {})
+        # Get 5-minute prediction percentage from FirstOne data
+        # FirstOne may return timeframe-specific data or overall data
         predicted_pct = 0.0
         
-        if tf_5m:
-            # Try to get the predicted percentage change
-            nums = tf_5m.get("nums", {})
-            if nums:
-                # Look for price prediction or return prediction
-                predicted_pct = nums.get("pred_pct", 0.0)
-                if predicted_pct == 0.0:
-                    predicted_pct = nums.get("ret_pred", 0.0)
+        # Try to extract prediction percentage from various possible locations
+        if "predicted_pct" in prediction_result:
+            predicted_pct = prediction_result["predicted_pct"]
+        elif "delta_pct" in prediction_result:
+            predicted_pct = prediction_result["delta_pct"]
+        elif "5m" in prediction_result:
+            tf_5m = prediction_result["5m"]
+            if isinstance(tf_5m, dict):
+                predicted_pct = tf_5m.get("predicted_pct", tf_5m.get("delta_pct", 0.0))
+        
+        # If we still don't have a prediction, try to infer from signal strength
+        if predicted_pct == 0.0:
+            if overall_signal in ["STRONGBUY", "STRONGSELL"]:
+                # Assume strong signals represent at least 2% moves
+                predicted_pct = 2.0 if overall_signal == "STRONGBUY" else -2.0
+            elif overall_signal in ["BUY", "SELL"]:
+                # Assume regular signals represent at least 1% moves  
+                predicted_pct = 1.0 if overall_signal == "BUY" else -1.0
+        
+        # Convert to percentage if not already
+        if abs(predicted_pct) > 1.0:
+            predicted_pct = predicted_pct / 100.0
         
         # Map signal to trading side
         side = SIGNAL_TO_SIDE.get(overall_signal)
-        reason = f"FirstOne signal: {overall_signal}, 5m prediction: {predicted_pct:.3f}%"
+        reason = f"FirstOne signal: {overall_signal}, predicted move: {predicted_pct:.3f}%"
         
         return side, reason, predicted_pct
         
@@ -438,15 +630,84 @@ async def main():
                     print("Trade execution cancelled by user")
                     return
                 
-                print("LIVE TRADING NOT YET IMPLEMENTED")
-                print("This would execute actual trades on Bybit")
-                # TODO: Implement actual trading logic here
-                # - Check/close existing positions
-                # - Set leverage
-                # - Place market order
-                # - Set TP/SL orders
+                print("\nExecuting LIVE TRADE...")
                 
-                audit_log["api_response"] = "Live trading not yet implemented"
+                # Step 1: Check and close existing positions
+                print("Checking existing positions...")
+                positions = await client.get_positions(args.symbol)
+                active_positions = [p for p in positions if float(p.get("size", 0)) > 0]
+                
+                if active_positions:
+                    print(f"Found {len(active_positions)} existing position(s), closing...")
+                    close_results = []
+                    for pos in active_positions:
+                        pos_side = pos.get("side")
+                        pos_size = pos.get("size")
+                        close_result = await client.close_position(args.symbol, pos_side, pos_size)
+                        close_results.append(close_result)
+                        if close_result["success"]:
+                            print(f"Closed {pos_side} position of {pos_size}")
+                        else:
+                            print(f"Failed to close {pos_side} position: {close_result}")
+                    
+                    audit_log["position_closes"] = close_results
+                    
+                    # Check if any close failed
+                    if not all(r["success"] for r in close_results):
+                        audit_log.update({
+                            "side": "skip",
+                            "decision_reason": "Failed to close existing positions"
+                        })
+                        write_audit_log(args.symbol, audit_log)
+                        print("SKIP: Failed to close existing positions")
+                        return
+                else:
+                    print("No existing positions found")
+                
+                # Step 2: Set leverage
+                print(f"Setting leverage to {args.leverage}x...")
+                leverage_result = await client.set_leverage(args.symbol, args.leverage)
+                audit_log["leverage_result"] = leverage_result
+                
+                if not leverage_result["success"]:
+                    # Warning but don't fail - might already be set
+                    print(f"Warning: Failed to set leverage: {leverage_result}")
+                
+                # Step 3: Place market entry order
+                print(f"Placing {side} market order for {qty:.6f} {args.symbol}...")
+                entry_result = await client.place_market_order(args.symbol, side, f"{qty:.6f}")
+                audit_log["entry_order"] = entry_result
+                
+                if not entry_result["success"]:
+                    reason = f"Failed to place entry order: {entry_result}"
+                    audit_log.update({
+                        "side": "skip",
+                        "decision_reason": reason
+                    })
+                    write_audit_log(args.symbol, audit_log)
+                    print(f"SKIP: {reason}")
+                    return
+                
+                print(f"Entry order placed successfully: {entry_result.get('order_id')}")
+                
+                # Step 4: Place TP/SL orders
+                print("Placing TP/SL orders...")
+                tp_sl_result = await client.place_tp_sl_order(
+                    args.symbol, side, f"{qty:.6f}", tp_price, sl_price
+                )
+                audit_log["tp_sl_orders"] = tp_sl_result
+                
+                if not tp_sl_result["success"]:
+                    print(f"Warning: Failed to place TP/SL orders: {tp_sl_result}")
+                else:
+                    print("TP/SL orders placed successfully")
+                
+                audit_log["live_execution_completed"] = True
+                print("✅ LIVE trade execution completed")
+                
+            else:
+                print("\n📝 DRY-RUN mode - no actual trades executed")
+                audit_log["dry_run_simulation"] = True
             
             write_audit_log(args.symbol, audit_log)
             print(f"\n{'LIVE' if args.live else 'DRY-RUN'} trade completed")

@@ -363,3 +363,127 @@ Advanced: use `--symbols` to pass a custom comma-separated list, or `WATCHLIST` 
 
 Security note: Do not commit `EMAIL_PASS` to version control. Prefer process managers or secret
 stores to inject credentials. Gmail app passwords are recommended for SMTP.
+
+## Automated Trading (autotrade_bybit.py)
+
+The `autotrade_bybit.py` script provides automated trading on Bybit USDT perpetual futures using predictions from `cryptoforecast.FirstOne`. It's designed to run once every 5 minutes on candle boundaries for systematic trading execution.
+
+### Key Features
+
+- **Timing**: Executes exactly on 5-minute candle boundaries (00:00, 00:05, 00:10, etc.)
+- **Safety**: Default dry-run mode with manual confirmation for live trades in TTY
+- **Position Management**: Automatically closes existing positions before opening new ones
+- **Price Sources**: Uses priority-based price fetching (mark price → v5 ticker → v2 ticker)
+- **Risk Management**: Configurable take-profit, stop-loss, and minimum profit thresholds
+- **Audit Trail**: Comprehensive JSON logging for every decision and execution
+
+### Trading Logic
+
+1. **Signal Generation**: Gets 5-minute predictions from `cryptoforecast.FirstOne`
+2. **Decision Mapping**:
+   - `STRONGBUY` or `BUY` → LONG position
+   - `STRONGSELL` or `SELL` → SHORT position  
+   - `FLAT` or no prediction → Skip
+3. **Profit Filter**: Requires minimum 1% potential profit (considering leverage)
+4. **Execution**: Market entry with automatic TP/SL orders
+
+### Risk Parameters
+
+- **Take-Profit**: Full predicted percentage move (factor = 1.0)
+- **Stop-Loss**: Fixed 2.5% adverse move (configurable via `SL_FRAC`)
+- **Leverage**: Default 10x (configurable)
+- **Minimum Profit**: 1% threshold (considering leverage factor)
+
+### Environment Variables
+
+For live trading, set these environment variables:
+
+```bash
+export BYBIT_API_KEY="your_api_key"
+export BYBIT_API_SECRET="your_api_secret"
+export BYBIT_TESTNET="true"  # Optional: use testnet (default: mainnet)
+```
+
+### Usage Examples
+
+**Dry-run (default, safe for testing):**
+```bash
+python3 autotrade_bybit.py
+python3 autotrade_bybit.py --symbol ETHUSDT
+python3 autotrade_bybit.py --leverage 5 --min-usd 50
+```
+
+**Live trading (requires API keys and manual confirmation):**
+```bash
+python3 autotrade_bybit.py --live
+python3 autotrade_bybit.py --symbol ETHUSDT --live --leverage 15
+```
+
+**Automated scheduling (run every 5 minutes):**
+```bash
+# Add to crontab for automated execution
+*/5 * * * * cd /path/to/crypto && /path/to/.venv/bin/python autotrade_bybit.py --live
+```
+
+### Command Line Options
+
+- `--symbol SYMBOL`: Trading pair (default: BTCUSDT)
+- `--live`: Execute live trades (default: dry-run)
+- `--leverage N`: Leverage multiplier (default: 10)
+- `--min-usd USD`: Minimum position size in USD (default: 10)
+
+### Audit Logging
+
+Every execution (including skips) creates a detailed JSON log at:
+`logs/autotrade/<SYMBOL>/YYYY-MM-DD_HH-MM-SS.json`
+
+Log includes:
+- Timestamp and symbol
+- Trading decision and reasoning
+- Market prices and sources
+- TP/SL calculations
+- Position sizing
+- API responses (live mode)
+- Error details (if any)
+
+### Safety Features
+
+1. **Dry-run Default**: All executions are simulated unless `--live` is explicitly used
+2. **Manual Confirmation**: Live trades require typing "YES" when run in terminal
+3. **Position Limits**: Maximum one position per symbol (closes existing before opening new)
+4. **Profit Thresholds**: Skips trades below minimum profit requirements
+5. **Error Handling**: Comprehensive error catching and logging
+6. **Price Validation**: Multiple fallback sources for price data
+
+### Example Output
+
+```
+Bybit Auto-Trading Bot
+Symbol: BTCUSDT
+Mode: DRY-RUN
+Leverage: 10x
+Min Position: $10
+--------------------------------------------------
+Already aligned to 5-min boundary: 14:05:01
+Fetching FirstOne prediction...
+
+TRADE DECISION:
+Side: Buy
+Entry Price: $43,250.4500 (mark_price)
+Take Profit: $43,685.6570
+Stop Loss: $42,168.9375
+Quantity: 0.000231
+Position Value: $10.00
+Reason: FirstOne signal: BUY, 5m prediction: 1.006%
+
+📝 DRY-RUN mode - no actual trades executed
+Audit log written to: logs/autotrade/BTCUSDT/2025-10-30_14-05-02.json
+DRY-RUN trade completed
+```
+
+### Integration Notes
+
+- Requires the main `cryptoforecast.py` module for predictions
+- Uses the same virtual environment and dependencies
+- Logs are stored alongside `cryptoforecast` logs for unified tracking
+- Can be run standalone or integrated with cron/systemd for automation
