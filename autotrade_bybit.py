@@ -739,24 +739,23 @@ async def main():
             
             # Calculate position size using 75% of available balance or fallback to min USD
             if available_balance > 0:
-                position_value_usd = available_balance * BALANCE_PERCENTAGE
-                print(f"Using {BALANCE_PERCENTAGE*100}% of balance: ${position_value_usd:.2f}")
+                margin_to_use = available_balance * BALANCE_PERCENTAGE
+                print(f"Using {BALANCE_PERCENTAGE*100}% of balance: ${margin_to_use:.2f}")
             else:
-                position_value_usd = args.min_usd
-                print(f"Using fallback minimum: ${position_value_usd:.2f}")
+                margin_to_use = args.min_usd
+                print(f"Using fallback minimum: ${margin_to_use:.2f}")
             
-            # Calculate quantity considering leverage
-            # For leveraged trading, we can control more value with less capital
-            # Position value = (qty * price) / leverage for margin calculation
-            # But qty itself should be based on the leveraged position size we want
-            leveraged_position_value = position_value_usd * args.leverage
-            qty_raw = leveraged_position_value / market_price
+            # Calculate position value considering leverage
+            # With leverage, position_value = margin_to_use * leverage
+            # This way we only risk the margin amount but control a larger position
+            position_value_usd = margin_to_use * args.leverage
+            qty_raw = position_value_usd / market_price
             
             # Format quantity according to Bybit rules
             qty_formatted = client.format_quantity(qty_raw, lot_size_filter)
             qty = float(qty_formatted)  # Convert back to float for calculations
             
-            # Calculate actual margin required
+            # Calculate actual margin required (should match margin_to_use)
             margin_required = (qty * market_price) / args.leverage
             
             audit_log.update({
@@ -767,8 +766,8 @@ async def main():
                 "sl_price": sl_price,
                 "available_balance": available_balance,
                 "balance_percentage": BALANCE_PERCENTAGE,
+                "margin_to_use": margin_to_use,
                 "position_value_usd": position_value_usd,
-                "leveraged_position_value": leveraged_position_value,
                 "margin_required": margin_required,
                 "qty_raw": qty_raw,
                 "qty_formatted": qty_formatted,
@@ -782,7 +781,7 @@ async def main():
             print(f"Take Profit: ${tp_price:.4f}")
             print(f"Stop Loss: ${sl_price:.4f}")
             print(f"Leverage: {args.leverage}x")
-            print(f"Position Value: ${leveraged_position_value:.2f} (leveraged)")
+            print(f"Position Value: ${position_value_usd:.2f} (leveraged)")
             print(f"Margin Required: ${margin_required:.2f}")
             print(f"Quantity: {qty_formatted} (raw: {qty_raw:.6f})")
             print(f"Reason: {decision_reason}")
@@ -843,9 +842,15 @@ async def main():
                 leverage_result = await client.set_leverage(args.symbol, args.leverage)
                 audit_log["leverage_result"] = leverage_result
                 
-                if not leverage_result["success"]:
-                    # Warning but don't fail - might already be set
+                # Check if leverage setting failed (but ignore "leverage not modified" - that's OK)
+                ret_code = leverage_result.get("response", {}).get("retCode", 0)
+                if not leverage_result["success"] and ret_code != 110043:
+                    # Only warn if it's not the "leverage not modified" error
                     print(f"Warning: Failed to set leverage: {leverage_result}")
+                elif ret_code == 110043:
+                    print(f"Leverage already set to {args.leverage}x")
+                else:
+                    print(f"Leverage set to {args.leverage}x successfully")
                 
                 # Step 3: Place market entry order
                 print(f"Placing {side} market order for {qty_formatted} {args.symbol}...")
